@@ -651,6 +651,11 @@ impl SortOrder {
 ///   them into coloured and uncoloured blocks after resolving annotations.
 /// - `FilesFirst`          : files on top, then folders.
 /// - `Mixed`               : no grouping, everything is sorted together by the criterion.
+/// - `ByType`              : one block per [`FileKind`] — folders, then
+///   applications, archives, audio, documents, images, video, configuration
+///   and finally unrecognized files. The criterion only orders entries
+///   *inside* a block, so a folder list reads as type sections even though no
+///   heading is drawn. Every batch of same-type entries is a group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupMode {
@@ -658,6 +663,7 @@ pub enum GroupMode {
     ColoredFoldersFirst,
     FilesFirst,
     Mixed,
+    ByType,
 }
 
 impl GroupMode {
@@ -667,6 +673,7 @@ impl GroupMode {
             GroupMode::ColoredFoldersFirst => "colored",
             GroupMode::FilesFirst => "files",
             GroupMode::Mixed => "mixed",
+            GroupMode::ByType => "type",
         }
     }
 
@@ -676,32 +683,70 @@ impl GroupMode {
             "colored" => GroupMode::ColoredFoldersFirst,
             "files" => GroupMode::FilesFirst,
             "mixed" => GroupMode::Mixed,
+            "type" => GroupMode::ByType,
             _ => return None,
+        })
+    }
+
+    /// Rank of an entry within this mode, or `None` when the mode does not
+    /// split the list into blocks at all (`Mixed`). The rank is a *grouping*
+    /// key: it always precedes the criterion and is never reversed by the
+    /// sort direction.
+    fn group_rank(self, entry: &Entry) -> Option<u8> {
+        Some(match self {
+            GroupMode::FoldersFirst | GroupMode::ColoredFoldersFirst => u8::from(!entry.is_dir),
+            GroupMode::FilesFirst => u8::from(entry.is_dir),
+            GroupMode::Mixed => return None,
+            GroupMode::ByType => type_group_rank(entry.kind),
         })
     }
 }
 
+/// Display order of the type sections in [`GroupMode::ByType`].
+///
+/// Folders lead (as everywhere in Favnyr), then files by decreasing
+/// specificity of what Favnyr can tell about them: a launchable program, an
+/// archive, media, documents, configuration, and finally the entries it could
+/// not classify. Kept `const` so the ordering is one table rather than a
+/// cascade of comparisons, and `u8` because that is all a `FileKind` occupies.
+///
+/// The first four entries are files (`Folder` sorts ahead of them); the rank is
+/// a total order over every [`FileKind`], which a test pins.
+const TYPE_GROUP_ORDER: [FileKind; 9] = [
+    FileKind::Folder,
+    FileKind::Application,
+    FileKind::Archive,
+    FileKind::Image,
+    FileKind::Video,
+    FileKind::Audio,
+    FileKind::Document,
+    FileKind::Config,
+    FileKind::File,
+];
+
+/// Rank of `kind` in [`TYPE_GROUP_ORDER`]: `0` for a folder, growing downwards.
+pub fn type_group_rank(kind: FileKind) -> u8 {
+    TYPE_GROUP_ORDER
+        .iter()
+        .position(|&candidate| candidate == kind)
+        .map_or(u8::MAX, |index| index as u8)
+}
+
 /// Sorts in place according to the criterion (`column` + `order`) and the
 /// grouping by type (`group`). Grouping takes **priority** over the criterion:
-/// in every grouped mode, one group always precedes the other regardless of
-/// sort direction; the criterion only breaks ties within a group. In `Mixed`
+/// in every grouped mode, one block always precedes the other regardless of
+/// sort direction; the criterion only breaks ties within a block. In `Mixed`
 /// mode, folders and files are sorted together by the criterion alone.
 ///
 /// Sort by name: case-insensitive, with digit runs compared as numbers.
 pub fn sort(entries: &mut [Entry], column: SortColumn, order: SortOrder, group: GroupMode) {
     use std::cmp::Reverse;
     let asc = matches!(order, SortOrder::Asc);
-    // Grouping rank (folders vs files): it splits the list into two blocks the
-    // criterion never crosses, and — unlike the criterion — it is NEVER reversed
-    // by the direction (folders stay on top in FoldersFirst even when sorting
+    // Grouping rank: it splits the list into blocks the criterion never
+    // crosses, and — unlike the criterion — it is NEVER reversed by the
+    // direction (folders stay on top in FoldersFirst even when sorting
     // descending). `Mixed` puts everything in one block.
-    let rank = |e: &Entry| -> u8 {
-        match group {
-            GroupMode::FoldersFirst | GroupMode::ColoredFoldersFirst => u8::from(!e.is_dir),
-            GroupMode::FilesFirst => u8::from(e.is_dir),
-            GroupMode::Mixed => 0,
-        }
-    };
+    let rank = |e: &Entry| group.group_rank(e).unwrap_or(0);
     // Name/Ext sort case-insensitively. Lowercasing a name INSIDE a comparison
     // sort re-allocates it on every comparison (~N·log N times); caching the key
     // lowercases each name once per entry instead. Only the criterion is
@@ -860,11 +905,7 @@ pub fn sort_with_secondary(
         sort(entries, column, order, group);
         return;
     };
-    let rank = |e: &Entry| match group {
-        GroupMode::FoldersFirst | GroupMode::ColoredFoldersFirst => u8::from(!e.is_dir),
-        GroupMode::FilesFirst => u8::from(e.is_dir),
-        GroupMode::Mixed => 0,
-    };
+    let rank = |e: &Entry| group.group_rank(e).unwrap_or(0);
     let by_day = secondary.group_dates_by_day
         && matches!(
             column,
@@ -1812,6 +1853,143 @@ mod tests {
         assert_eq!(v[2].name, "small.bin");
     }
 
+    /// Every `FileKind` gets its own section, and the table is a total order:
+    /// no duplicate, no entry left out, so a new kind cannot silently land in
+    /// the folder block.
+    #[test]
+    fn type_group_order_is_a_total_order_over_every_kind() {
+        for kind in [
+            FileKind::Folder,
+            FileKind::File,
+            FileKind::Application,
+            FileKind::Archive,
+            FileKind::Audio,
+            FileKind::Document,
+            FileKind::Image,
+            FileKind::Video,
+            FileKind::Config,
+        ] {
+            let rank = type_group_rank(kind);
+            assert!(rank < u8::MAX, "{kind:?} must have a rank");
+            assert_eq!(
+                TYPE_GROUP_ORDER.iter().filter(|&&c| c == kind).count(),
+                1,
+                "{kind:?} must appear exactly once"
+            );
+        }
+        let mut ranks: Vec<u8> = TYPE_GROUP_ORDER
+            .iter()
+            .copied()
+            .map(type_group_rank)
+            .collect();
+        ranks.sort_unstable();
+        ranks.dedup();
+        assert_eq!(
+            ranks.len(),
+            TYPE_GROUP_ORDER.len(),
+            "ranks must be distinct"
+        );
+        assert_eq!(type_group_rank(FileKind::Folder), 0, "folders lead");
+    }
+
+    /// `ByType` gathers one block per kind regardless of the sort direction,
+    /// and the criterion still orders entries inside a block.
+    #[test]
+    fn sort_by_type_sections_kinds_and_orders_within_each() {
+        let mut v = vec![
+            make_entry("zeta.txt", false),
+            make_entry("alpha-dir", true),
+            make_entry("Bravo.png", false),
+            make_entry("aaa-dir", true),
+            make_entry("notes.pdf", false),
+            make_entry("song.mp3", false),
+            make_entry("setup.exe", false),
+            make_entry("bundle.zip", false),
+            make_entry("clip.mp4", false),
+            make_entry("settings.json", false),
+            make_entry("README", false),
+        ];
+        sort(&mut v, SortColumn::Name, SortOrder::Asc, GroupMode::ByType);
+        let names: Vec<_> = v.iter().map(|e| e.name.as_str()).collect();
+        // Folders, applications, archives, images, video, audio, documents,
+        // configuration, then the unclassified file — name order inside each.
+        assert_eq!(
+            names,
+            [
+                "aaa-dir",
+                "alpha-dir",
+                "setup.exe",
+                "bundle.zip",
+                "Bravo.png",
+                "clip.mp4",
+                "song.mp3",
+                "notes.pdf",
+                "zeta.txt",
+                "settings.json",
+                "README",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_by_type_never_reverses_sections_but_reverses_within_them() {
+        let mut v = vec![
+            make_entry("a.txt", false),
+            make_entry("b.txt", false),
+            make_entry("z-dir", true),
+            make_entry("y-dir", true),
+            make_entry("m.png", false),
+        ];
+        sort(&mut v, SortColumn::Name, SortOrder::Desc, GroupMode::ByType);
+        let names: Vec<_> = v.iter().map(|e| e.name.as_str()).collect();
+        // Sections keep their order; only the names inside each one reverse.
+        assert_eq!(names, ["z-dir", "y-dir", "m.png", "b.txt", "a.txt"]);
+    }
+
+    /// A secondary criterion must respect the same blocks, or switching the
+    /// second column would fall back to one run of the whole folder.
+    #[test]
+    fn secondary_sort_keeps_type_sections() {
+        let mut entries = vec![
+            sized_entry("large.png", 900),
+            sized_entry("small.png", 10),
+            sized_entry("big.txt", 700),
+            make_entry("folder", true),
+        ];
+        sort_with_secondary(
+            &mut entries,
+            SortColumn::Ext,
+            SortOrder::Asc,
+            GroupMode::ByType,
+            Some(SecondarySort {
+                column: SortColumn::Size,
+                order: SortOrder::Desc,
+                group_dates_by_day: false,
+            }),
+            0,
+        );
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        // Folders keep the top section, then one section per file type: the
+        // images by decreasing size, then the document.
+        assert_eq!(names, ["folder", "large.png", "small.png", "big.txt"]);
+    }
+
+    #[test]
+    fn by_type_code_round_trips_and_unknown_codes_are_rejected() {
+        assert_eq!(GroupMode::ByType.code(), "type");
+        assert_eq!(GroupMode::from_code("type"), Some(GroupMode::ByType));
+        assert_eq!(GroupMode::from_code("nonsense"), None);
+        for mode in [
+            GroupMode::FoldersFirst,
+            GroupMode::ColoredFoldersFirst,
+            GroupMode::FilesFirst,
+            GroupMode::Mixed,
+            GroupMode::ByType,
+        ] {
+            assert_eq!(GroupMode::from_code(mode.code()), Some(mode));
+        }
+    }
+
     #[test]
     fn list_dir_reads_temp() {
         let tmp = std::env::temp_dir().join(format!("favnyr-fs-test-{}", nano()));
@@ -2050,11 +2228,15 @@ mod tests {
             mtime_unix: None,
             created_unix: None,
             is_dir,
-            kind: if is_dir {
-                FileKind::Folder
-            } else {
-                FileKind::File
-            },
+            // Classified the way `list_dir` does it, so a fixture with an
+            // extension lands in its real type section.
+            kind: classify_kind(
+                Path::new(name)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .filter(|_| !is_dir),
+                is_dir,
+            ),
             hidden: false,
             is_symlink: false,
             executable: false,
@@ -2069,7 +2251,10 @@ mod tests {
             mtime_unix: None,
             created_unix: None,
             is_dir: false,
-            kind: FileKind::File,
+            kind: classify_kind(
+                Path::new(name).extension().and_then(|ext| ext.to_str()),
+                false,
+            ),
             hidden: false,
             is_symlink: false,
             executable: false,

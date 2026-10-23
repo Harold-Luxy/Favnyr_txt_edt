@@ -15,7 +15,7 @@
 // Translated labels are independent properties of the `Strings` global below.
 // Colors come from `Palette` (switched by `apply-theme()`).
 
-import { ComboBox, VerticalBox, HorizontalBox, ScrollView, LineEdit, Button, SpinBox, CheckBox, Palette } from "std-widgets.slint";
+import { ComboBox, VerticalBox, HorizontalBox, ScrollView, LineEdit, TextEdit, Button, SpinBox, CheckBox, Palette } from "std-widgets.slint";
 
 // ---------- Structs shared between Rust and Slint ----------
 
@@ -317,6 +317,12 @@ export struct PanelView {
     viewport-reset-gen: int,
     tabs: [TabInfo],
     current-path: string,
+    // EDITOR view. When `editor-file` is non-empty the view edits that file
+    // instead of listing `current-path`; `editor-text` is its buffer and
+    // `editor-dirty` says whether it differs from disk.
+    editor-file: string,
+    editor-text: string,
+    editor-dirty: bool,
     total-count: int,
     can-go-back: bool,
     can-go-forward: bool,
@@ -565,6 +571,7 @@ export global Strings {
     in-out property <string> group-folders-first;
     in-out property <string> group-colored-folders-first;
     in-out property <string> group-files-first;
+    in-out property <string> group-by-type;
     in-out property <string> group-mixed;
 
     in-out property <string> tab-new-tooltip;
@@ -597,6 +604,7 @@ export global Strings {
     in-out property <string> ctx-open-with;
     in-out property <string> ctx-open-parent;
     in-out property <string> ctx-open-terminal;
+    in-out property <string> ctx-open-in-editor;
     in-out property <string> ctx-new;                  // unified parent entry "New" (flyout)
     in-out property <string> ctx-new-folder;
     in-out property <string> ctx-new-file;
@@ -3888,6 +3896,311 @@ component PanelSplitterAbs inherits Rectangle {
     }
 }
 
+// ---------- Editor view ----------
+//
+// A view of this kind does not list a folder: it edits one text file. Unlike
+// the folder views, the text lives in a Slint `TextEdit`, so the view is an
+// ordinary Slint component — it resizes, splits, moves and closes exactly like
+// any other view, with nothing to synchronise against the OS.
+//
+// The title bar carries the file name, the full path (elided, full text on
+// hover), a dirty marker and the same close/move affordances as a folder view.
+// Saving is delegated: the bridge decides when to write (Ctrl+S, focus loss,
+// closing the view), and only reports back whether the buffer is still dirty.
+component EmbeddedEditorPanel inherits Rectangle {
+    in property <string> file-path: "";
+    in property <string> file-title: "";
+    in property <bool> can-close: false;
+    in property <bool> active: false;
+    // Unsaved changes present.
+    in property <bool> dirty: false;
+    // Current buffer. Two-way with the edit box below.
+    in-out property <string> text: "";
+    // This view is the source of the ongoing view drag (turns the grip's
+    // cursor into a grabbing hand, like a folder view's).
+    in property <bool> view-dragging: false;
+
+    callback close-requested();
+    // Typed text, for the bridge to store and to recompute the dirty flag.
+    callback text-changed(string);
+    // Ctrl+S, and the save button in the title bar.
+    callback save-requested();
+    // The edit box lost focus: the save policy for this view kind.
+    callback blur-requested();
+    // View-swap gesture, at ABSOLUTE (window-relative) positions: press arms
+    // it, dragged reports progress so the other views light up their drop
+    // zones, released commits the drop.
+    callback grip-pressed(length, length);
+    callback grip-dragged(length, length);
+    callback grip-released(length, length);
+    // Hover of the truncated path → the full one, via the shared Tip.
+    callback path-hover(length, length);
+
+    preferred-width: 0px;
+    min-width: 0px;
+    max-width: 99999px;
+
+    background: root.active ? Theme.surface : Theme.background;
+    border-radius: Tokens.radius-panel;
+    border-width: root.active ? 2px : 1px;
+    border-color: root.active ? Theme.accent-background : Theme.border;
+
+    property <length> bar-height: 32px;
+
+    title-bar := Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: root.bar-height;
+        background: root.active ? Theme.toolbar : Theme.surface;
+        border-radius: Tokens.radius-panel - 1px;
+
+        // ----- Text block: name on top, full path underneath -----
+        // Shifted right by the dirty marker's slot, so the name never jumps when
+        // the marker appears.
+        Rectangle {
+            x: 18px;
+            y: 2px;
+            width: max(0px, parent.width - 88px);
+            height: parent.height - 4px;
+            background: transparent;
+
+            Text {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                height: 15px;
+                text: root.file-title;
+                color: Theme.foreground;
+                font-size: 13px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+
+            Text {
+                x: 0px;
+                y: 15px;
+                width: parent.width;
+                height: 13px;
+                text: root.file-path;
+                color: Theme.foreground.with-alpha(0.6);
+                font-size: 11px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+
+            // Only the path line is hover-sensitive: the full path is worth
+            // showing back when it was cut, the file name rarely needs it.
+            path-touch := TouchArea {
+                x: 0px;
+                y: 15px;
+                width: parent.width;
+                height: 13px;
+                mouse-cursor: pointer;
+                changed has-hover => {
+                    if (self.has-hover && root.file-path != "") {
+                        root.path-hover(self.absolute-position.x, self.absolute-position.y);
+                    }
+                }
+            }
+        }
+
+        // ----- Unsaved-changes marker -----
+        // A filled dot rather than an asterisk in the name: it stays put at a
+        // fixed position, so the title does not reflow as the user types.
+        if root.dirty : Rectangle {
+            x: 8px;
+            y: (parent.height - 6px) / 2;
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: Tokens.warning;
+        }
+
+        // ----- Save (only meaningful while there is something to save) -----
+        if root.dirty && root.can-close : Rectangle {
+            x: parent.width - 80px;
+            y: (parent.height - 22px) / 2;
+            width: 22px;
+            height: 22px;
+            border-radius: 4px;
+            background: save-touch.has-hover
+                ? Theme.accent-background.with-alpha(0.28)
+                : Theme.accent-background.with-alpha(0.14);
+            border-width: 1px;
+            border-color: Theme.accent-background.with-alpha(0.55);
+
+            Text {
+                text: "⤓";
+                color: Theme.accent-background;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            save-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.save-requested(); }
+            }
+        }
+
+        // ----- Move this view (same gesture as a folder view's grip) -----
+        move-btn := Rectangle {
+            x: parent.width - 54px;
+            y: (parent.height - 22px) / 2;
+            width: 22px;
+            height: 22px;
+            border-radius: 4px;
+            background: move-touch.has-hover
+                ? Theme.accent-background.with-alpha(0.18)
+                : transparent;
+            border-width: 1px;
+            border-color: move-touch.has-hover
+                ? Theme.accent-background.with-alpha(0.55)
+                : Theme.border;
+            opacity: root.can-close ? 1.0 : 0.35;
+            visible: root.can-close;
+
+            Image {
+                source: @image-url("../../assets/icons/grip-horizontal.svg");
+                width: 14px;
+                height: 9px;
+                colorize: Theme.foreground;
+                opacity: move-touch.has-hover ? 0.65 : 0.32;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            move-touch := TouchArea {
+                mouse-cursor: root.view-dragging ? grabbing : grab;
+
+                // Same gesture as a folder view's grip, line for line: a 6px
+                // threshold on both axes before the drag starts (so a click
+                // never becomes a drag), progress reported continuously (that
+                // is what lights up the drop zones of the other views), and the
+                // tooltip shown on hover.
+                property <length> down-x;
+                property <length> down-y;
+                property <bool> dragging;
+
+                changed has-hover => {
+                    if (self.has-hover && !root.view-dragging) {
+                        Tip.text = Strings.panel-move-tooltip;
+                        Tip.x = self.absolute-position.x;
+                        Tip.y = self.absolute-position.y + self.height + 4px;
+                    } else if (Tip.text == Strings.panel-move-tooltip) {
+                        Tip.text = "";
+                    }
+                }
+                pointer-event(ev) => {
+                    if (ev.button == PointerEventButton.left
+                            && ev.kind == PointerEventKind.down) {
+                        self.down-x = self.absolute-position.x + self.mouse-x;
+                        self.down-y = self.absolute-position.y + self.mouse-y;
+                        self.dragging = false;
+                        root.grip-pressed(self.down-x, self.down-y);
+                    }
+                    if (ev.button == PointerEventButton.left
+                            && ev.kind == PointerEventKind.up) {
+                        let ax = self.absolute-position.x + self.mouse-x;
+                        let ay = self.absolute-position.y + self.mouse-y;
+                        if (self.dragging) {
+                            root.grip-released(ax, ay);
+                        }
+                        self.dragging = false;
+                    }
+                }
+                moved => {
+                    let ax = self.absolute-position.x + self.mouse-x;
+                    let ay = self.absolute-position.y + self.mouse-y;
+                    if (self.pressed && !self.dragging
+                            && (abs(ax - self.down-x) > 6px || abs(ay - self.down-y) > 6px)) {
+                        self.dragging = true;
+                        Tip.text = "";
+                    }
+                    if (self.pressed && self.dragging) {
+                        root.grip-dragged(ax, ay);
+                    }
+                }
+            }
+        }
+
+        // ----- Close this view (rightmost) -----
+        close-btn := Rectangle {
+            x: parent.width - 28px;
+            y: (parent.height - 22px) / 2;
+            width: 22px;
+            height: 22px;
+            border-radius: 4px;
+            background: close-touch.has-hover
+                ? Tokens.danger.with-alpha(0.27)
+                : transparent;
+            border-width: 1px;
+            border-color: close-touch.has-hover
+                ? Tokens.danger.with-alpha(0.4)
+                : Theme.border;
+            visible: root.can-close;
+
+            Image {
+                source: @image-url("../../assets/icons/close.svg");
+                width: 11px;
+                height: 11px;
+                colorize: close-touch.has-hover ? Tokens.danger : Theme.foreground.with-alpha(0.7);
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            close-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.close-requested(); }
+            }
+        }
+    }
+
+    // ----- The text itself -----
+    //
+    // A plain `TextEdit`: it owns the caret, selection, scrolling and IME
+    // itself, so this view needs no native window and no coordinate maths. The
+    // border around it only marks the editing surface against the panel.
+    Rectangle {
+        x: 1px;
+        y: root.bar-height + 3px;
+        width: max(0px, root.width - 2px);
+        height: max(0px, root.height - root.bar-height - 4px);
+        background: Theme.surface;
+        border-radius: Tokens.radius-panel - 3px;
+        clip: true;
+
+        editor := TextEdit {
+            // TextEdit is not a layout element, so the breathing room around the
+            // text is an inset on the box itself rather than padding. Kept to a
+            // hairline: the widget already pads its own text, and anything more
+            // would read as the view not being filled.
+            x: 2px;
+            y: 2px;
+            width: max(0px, parent.width - 4px);
+            height: max(0px, parent.height - 4px);
+            text <=> root.text;
+            wrap: no-wrap;
+            font-size: 14px;
+            edited => { root.text-changed(editor.text); }
+            key-pressed(event) => {
+                // Ctrl+S writes through the bridge, which owns the file. The
+                // event is accepted so no other binding sees it.
+                if (event.modifiers.control && event.text == "s") {
+                    root.save-requested();
+                    return accept;
+                }
+                return reject;
+            }
+            changed has-focus => {
+                // Focus left the edit box: the blur save policy applies.
+                if (!self.has-focus) { root.blur-requested(); }
+            }
+        }
+    }
+}
+
 // ---------- PanelComponent: a complete panel (tabs + nav + rows + footer) ----------
 
 component PanelComponent inherits Rectangle {
@@ -3940,6 +4253,13 @@ component PanelComponent inherits Rectangle {
     callback column-moved(string, int);
     // type-ahead filter — current text (shown if view is active) + reset.
     in property <string> filter-text: "";
+    // EDITOR view: `view.editor-file` names the edited file. The panel then
+    // renders the text in a `TextEdit` instead of a folder listing.
+    out property <bool> is-editor: root.view.editor-file != "";
+    // Forwarded to the window, which addresses the bridge by panel index.
+    callback editor-text-changed(string);
+    callback editor-save-requested();
+    callback editor-blur();
     callback filter-clear();
     callback search-scope-toggle();
     out property <bool> search-pointer-busy: root.view.search-recursive
@@ -4907,6 +5227,7 @@ component PanelComponent inherits Rectangle {
         }
 
     VerticalLayout {
+        visible: !root.is-editor;
         spacing: 6px;
 
         // ===== Top toolbar (tabs + nav) =====
@@ -7174,6 +7495,43 @@ component PanelComponent inherits Rectangle {
                     : @image-url("../../assets/icons/arrow-down.svg");
                 colorize: Theme.accent-background.with-alpha(parent.chosen ? 0.95 : 0.45);
             }
+        }
+    }
+    // ===== Editor view =====
+    // Declared LAST so it sits above every other layer of the panel, and
+    // explicitly full-size: its content is absolutely positioned, so its
+    // preferred size is 0 and it would otherwise collapse to nothing instead of
+    // taking the view's rectangle.
+    if root.is-editor : EmbeddedEditorPanel {
+        width: 100%;
+        height: 100%;
+        file-path: root.view.editor-file;
+        file-title: root.view.title;
+        active: root.active;
+        can-close: root.can-close;
+        dirty: root.view.editor-dirty;
+        text: root.view.editor-text;
+        view-dragging: root.view-drag-is-source;
+        close-requested => { root.close-panel(); }
+        text-changed(t) => { root.editor-text-changed(t); }
+        save-requested => { root.editor-save-requested(); }
+        blur-requested => { root.editor-blur(); }
+        // The grip drives the SAME view-drag state machine a folder view uses,
+        // so drop zones, the swap animation and the splitter previews all work
+        // unchanged. The only difference is at the end: `view-drag-completed`
+        // refuses the tear-off for editor views (see MainWindow).
+        grip-pressed(ax, ay) => {
+            root.vd-x = ax;
+            root.vd-y = ay;
+            root.view-dragging = false;
+        }
+        grip-dragged(ax, ay) => {
+            root.view-dragging = true;
+            root.view-drag-progress(ax, ay);
+        }
+        grip-released(ax, ay) => {
+            root.view-dragging = false;
+            root.view-drag-completed(ax, ay);
         }
     }
 }
@@ -9902,9 +10260,25 @@ export component MainWindow inherits Window {
     in-out property <bool> ctx-selection-single: false;
     // The primary selected item is a folder — hides "Open with" (files only).
     in-out property <bool> ctx-selection-is-dir: false;
+    // Exactly one selected file the embedded editor accepts — shows
+    // "Open in editor view". Decided by the bridge, which alone can tell a
+    // text file from a folder and a multi-selection from a single one.
+    in-out property <bool> ctx-can-embed-editor: false;
     callback action-open-with();
     callback action-open-parent();
     callback action-open-terminal();
+    // Opens the selected text file in a NEW editor view.
+    callback action-open-in-editor();
+    // Editor view at `panel`: typed text, explicit save (Ctrl+S / button),
+    // and focus loss (which saves under this view kind's policy).
+    callback editor-text-changed(int /*panel*/, string);
+    callback editor-save-requested(int /*panel*/);
+    callback editor-blur(int /*panel*/);
+    // Dirty flag of the ACTIVE editor view, pushed back by the bridge. Kept at
+    // window level because the title bar reads it directly.
+    in-out property <bool> editor-dirty: false;
+    // The editor view at `panel` asks to be closed (title-bar ✕).
+    callback editor-close-requested(int /*panel*/);
     callback action-copy();
     callback action-cut();
     callback action-paste();
@@ -10967,7 +11341,8 @@ export component MainWindow inherits Window {
                 root.set-group-mode(root.active-panel-idx,
                     root.panels[root.active-panel-idx].group-mode == "folders" ? "colored"
                     : root.panels[root.active-panel-idx].group-mode == "colored" ? "files"
-                    : root.panels[root.active-panel-idx].group-mode == "files" ? "mixed"
+                    : root.panels[root.active-panel-idx].group-mode == "files" ? "type"
+                    : root.panels[root.active-panel-idx].group-mode == "type" ? "mixed"
                     : "folders");
             }
             return;
@@ -11651,10 +12026,16 @@ export component MainWindow inherits Window {
                             root.swap-flight-a = zone == 1 ? idx : -1;
                             root.swap-flight-b = zone == 1 ? target : -1;
                             root.view-dropped(idx, target, zone);
-                        } else if (!cancelled) {
+                        } else if (!cancelled && root.panels[idx].editor-file == "") {
                             // No view under the cursor. The bridge checks
                             // whether the release truly landed outside the
                             // window before detaching anything.
+                            //
+                            // Editor views are excluded: tearing one off would
+                            // start a new process that can only be given
+                            // folders, so the note would come back as a listing
+                            // of its directory. A drop on empty space is simply
+                            // cancelled for them.
                             root.view-torn-off(idx, ax, ay);
                         }
                     }
@@ -11662,6 +12043,17 @@ export component MainWindow inherits Window {
                     // (never from `panel`) → its update does not invalidate
                     // `view.rendered-rows`.
                     footer-text: idx < root.panel-footers.length ? root.panel-footers[idx] : "";
+                    // Editor plumbing: every report carries the panel index,
+                    // since the bridge keys buffers by view.
+                    editor-text-changed(t) => {
+                        root.editor-text-changed(idx, t);
+                    }
+                    editor-save-requested => {
+                        root.editor-save-requested(idx);
+                    }
+                    editor-blur => {
+                        root.editor-blur(idx);
+                    }
                     active: idx == root.active-panel-idx;
                     can-close: root.panels.length > 1;
 
@@ -12180,6 +12572,14 @@ export component MainWindow inherits Window {
                     hovered(h) => { root.folder-reveal-parent-hover = h; }
                 }
                 MenuItem { nav-level: root.ctx-full-nav-level; label: Strings.ctx-open-terminal; shortcut: root.menu-shortcuts.terminal; clicked => { root.ctx-close(); root.action-open-terminal(); } }
+                // Embedded editor: only offered for a single selected text
+                // file — the bridge sets `ctx-can-embed-editor` accordingly,
+                // since only it knows the selection's type and count.
+                if root.ctx-can-embed-editor : MenuItem {
+                    nav-level: root.ctx-full-nav-level;
+                    label: Strings.ctx-open-in-editor;
+                    clicked => { root.ctx-close(); root.action-open-in-editor(); }
+                }
                 // Pinned user commands — filtered by the bridge
                 // based on the target (file / folder).
                 if root.ctx-custom-entries.length > 0 : Rectangle { height: 1px; background: Theme.border; }
@@ -13610,9 +14010,9 @@ export component MainWindow inherits Window {
             x: min(root.columns-menu-x, root.width - self.width - 8px);
             y: min(root.columns-menu-y, root.height - self.height - 8px);
             width: 270px;
-            // Manual mode (52 + separator 9), grouping, columns, extension
-            // filter and outer padding.
-            height: self.cols.length * 30px + (self.grid-mode ? 250px : 259px)
+            // Manual mode (52 + separator 9), grouping (heading + 5 modes),
+            // columns, extension filter and outer padding.
+            height: self.cols.length * 30px + (self.grid-mode ? 280px : 289px)
                 + (root.panels[root.columns-menu-panel].manual-order || self.grid-mode ? 0px : 36px);
             background: Theme.surface;
             border-radius: Tokens.radius-overlay;
@@ -13717,6 +14117,7 @@ export component MainWindow inherits Window {
                     { code: "folders", label: Strings.group-folders-first },
                     { code: "colored", label: Strings.group-colored-folders-first },
                     { code: "files", label: Strings.group-files-first },
+                    { code: "type", label: Strings.group-by-type },
                     { code: "mixed", label: Strings.group-mixed },
                 ] : Rectangle {
                     height: 30px;

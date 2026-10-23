@@ -366,7 +366,9 @@ impl Tab {
             grid_zoom: (display.thumbnail_zoom != GRID_DEFAULT_ZOOM)
                 .then_some(display.thumbnail_zoom),
             show_hidden: display.show_hidden,
-            group_mode: GroupMode::FoldersFirst,
+            // Same default as a tab restored without the field: new views open
+            // grouped by type.
+            group_mode: GroupMode::ByType,
             cursor: -1,
             scroll_gen: 0,
             ext_filter_on: false,
@@ -617,6 +619,44 @@ struct Panel {
     /// Child to select after an asynchronous upward navigation.
     pending_select: Option<String>,
     search: Option<search::Session>,
+    /// Non-`None` marks this view as an EDITOR view: instead of listing a
+    /// folder, it shows the contents of a text file in a Slint `TextEdit`.
+    /// Such a view always carries exactly one tab (no multi-tab editing), and
+    /// that tab's `current_path` is the edited FILE's folder. Every other field
+    /// stays valid so layout, splitting, closing and workspace persistence keep
+    /// working unchanged; the listing machinery is simply never driven.
+    editor: Option<EditorTarget>,
+}
+
+/// What an editor view edits.
+///
+/// The path is kept apart from `Panel::displayed_path` on purpose: the latter
+/// always names a directory, and conflating the two would make a restored
+/// workspace try to list the text file as if it were a folder.
+#[derive(Clone)]
+struct EditorTarget {
+    /// Absolute path of the edited file, re-checked when a workspace restores
+    /// the view.
+    file: PathBuf,
+}
+
+/// Live editing state of one editor view.
+///
+/// `saved` is the text as it currently exists on disk and `text` what the user
+/// has typed: the difference is what "dirty" means, so returning to the saved
+/// content by hand clears the marker on its own, with no extra bookkeeping.
+#[derive(Default)]
+struct EditorBuffer {
+    /// Current content of the edit box.
+    text: String,
+    /// Content last read from or written to disk.
+    saved: String,
+}
+
+impl EditorBuffer {
+    fn is_dirty(&self) -> bool {
+        self.text != self.saved
+    }
 }
 
 impl Panel {
@@ -679,7 +719,36 @@ impl Panel {
             listing_gen: 0,
             pending_select: None,
             search: None,
+            editor: None,
         }
+    }
+
+    /// Constructor for an EMBEDDED EDITOR view.
+    ///
+    /// `file` must be an existing regular file: an editor view has no blank
+    /// state, so it is only ever created from a concrete target. The view's
+    /// single tab points at the file's FOLDER — that keeps every navigation
+    /// helper (breadcrumbs, parent, address bar) meaningful if the view is
+    /// ever turned back into a browser — while `editor.file` remembers what is
+    /// actually being edited.
+    fn editor_view(
+        file: PathBuf,
+        columns: Vec<ColumnSpec>,
+        tab_bar_mode: u8,
+        display: impl Into<TabDisplayDefaults>,
+    ) -> Self {
+        let folder = file
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut panel = Self::with_mode(folder, columns, tab_bar_mode, display);
+        panel.editor = Some(EditorTarget { file });
+        panel
+    }
+
+    /// The file an editor view edits, or `None` for a folder view.
+    fn editor_file(&self) -> Option<&Path> {
+        self.editor.as_ref().map(|target| target.file.as_path())
     }
 
     fn bump_rows_revision(&self) {
@@ -742,6 +811,11 @@ fn panel_to_state(panel: &Panel) -> ViewState {
         columns: panel.columns.clone(),
         tab_bar_mode: panel.tab_bar_mode,
         vbar_width: panel.vbar_user_w,
+        // `Some` marks the view as an editor on restore; `None` keeps it a
+        // folder view. The path is the FILE, not the folder its tab points at.
+        editor_file: panel
+            .editor_file()
+            .map(|f| f.display().to_string()),
     }
 }
 
@@ -1273,6 +1347,13 @@ pub struct AppState {
     /// UI zoom. Stable reference for `apply_ui_scale` (scale = base ×
     /// factor). `0.0` = not yet captured.
     ui_base_scale: Rc<Cell<f32>>,
+    /// Unsaved text of every open editor view, keyed by panel index.
+    ///
+    /// The buffer lives here rather than in `Panel` for the same reason the
+    /// selection does: it changes on every keystroke, and rebuilding a
+    /// `PanelView` for that would invalidate the row models of every other
+    /// view. A panel whose editor has nothing pending simply has no entry.
+    editor_buffers: Rc<RefCell<HashMap<usize, EditorBuffer>>>,
 }
 
 /// Maximum number of panels. Splits are "unlimited" by design;
@@ -1405,6 +1486,7 @@ impl AppState {
             shell_known: Rc::new(RefCell::new(Vec::new())),
             shell_scanned: Rc::new(Cell::new(false)),
             ui_base_scale: Rc::new(Cell::new(0.0)),
+            editor_buffers: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 
@@ -1497,6 +1579,7 @@ impl AppState {
             shell_known: Rc::new(RefCell::new(Vec::new())),
             shell_scanned: Rc::new(Cell::new(false)),
             ui_base_scale: Rc::new(Cell::new(0.0)),
+            editor_buffers: Rc::new(RefCell::new(HashMap::new())),
         };
         // A single read at startup: subsequent live comparisons are
         // entirely in memory.
@@ -3689,6 +3772,11 @@ pub fn install(window: &MainWindow, state: AppState) {
             // hidden (it hands a file to an application; a folder is opened by
             // navigating into it).
             w.set_ctx_selection_is_dir(primary_dir);
+            // "Open in editor view": exactly ONE selected item, and it must be
+            // a text file the embedded editor accepts. Mirrors the guard in the
+            // handler itself, so the entry is never offered for something the
+            // action would then refuse.
+            w.set_ctx_can_embed_editor(is_file && sel.first().is_some_and(|p| is_text_editable(p)));
             // Distinct from the line above, which describes only the PRIMARY
             // item: a selection whose first entry happens to be a file may
             // still hold folders worth colouring.
@@ -4519,6 +4607,107 @@ pub fn install(window: &MainWindow, state: AppState) {
             let target = paths.first().cloned().unwrap_or_else(|| st.current_path());
             if let Err(err) = actions::open_terminal(&target) {
                 error!(error = %err, "open_terminal failed");
+            }
+        });
+    }
+
+    // ext: Open in an embedded editor view -----
+    //
+    // Only offered for exactly one selected text file. The view is created NEXT
+    // TO the source view (never replacing it) and always binds to a concrete
+    // file: there is no blank editor state, so a missing target is an error
+    // rather than an empty view.
+    {
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_action_open_in_editor(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let paths = selected_paths(&st);
+            let Some(file) = paths.first().cloned() else {
+                return;
+            };
+            if !is_text_editable(&file) {
+                return;
+            }
+            if !file.is_file() {
+                let lang = st.snapshot_config().language;
+                notice(&w, i18n::tr(lang, "editor_missing_file"), NoticeKind::Error);
+                return;
+            }
+            // One editor view per file: a second process on the same file would
+            // let two buffers overwrite each other (the last saver wins), which
+            // is exactly the silent data loss an editor must not introduce. The
+            // existing view is brought forward instead.
+            if let Some(existing) = find_editor_view(&st, &file) {
+                *st.active_panel.borrow_mut() = existing;
+                switch_active_panel(&w, &st);
+                let lang = st.snapshot_config().language;
+                notice(&w, i18n::tr(lang, "editor_already_open"), NoticeKind::FavExists);
+                return;
+            }
+            open_editor_view(&w, &st, file);
+        });
+    }
+
+    // Editor view plumbing -----
+    {
+        // Live typing. Only the dirty flag is pushed back to the view: rewriting
+        // the text property on every keystroke would fight the edit box.
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_editor_text_changed(move |panel: i32, text: slint::SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let idx = panel.max(0) as usize;
+            let dirty = set_editor_text(&st, idx, text.to_string());
+            w.set_editor_dirty(dirty);
+        });
+    }
+    {
+        // Ctrl+S, and the title-bar save button.
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_editor_save_requested(move |panel: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let idx = panel.max(0) as usize;
+            let saved = save_editor(&st, idx);
+            if saved {
+                info!(panel = idx, "editor buffer saved");
+            }
+            w.set_editor_dirty(editor_is_dirty(&st, idx));
+        });
+    }
+    {
+        // Losing focus saves (policy chosen for this view kind): the note is
+        // written as soon as the user turns to something else, so switching
+        // views never loses typed text and no prompt is needed.
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_editor_blur(move |panel: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let idx = panel.max(0) as usize;
+            save_editor(&st, idx);
+            w.set_editor_dirty(editor_is_dirty(&st, idx));
+        });
+    }
+    {
+        // The title-bar ✕ closes the view, exactly like a folder view's.
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_editor_close_requested(move |panel: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let idx = panel.max(0) as usize;
+            if idx >= st.panels.borrow().len() {
+                return;
+            }
+            // Closing counts as leaving the view: the blur policy applies here
+            // too, so a note is never discarded by closing its view.
+            save_editor(&st, idx);
+            if let Some(closed) = take_view(&st, idx) {
+                remember_closed_panel(&st, closed);
+                w.set_closed_tabs_available(true);
+                switch_active_panel(&w, &st);
+                update_panels_ui(&w, &st);
+                st.persist_workspace();
             }
         });
     }
@@ -11851,6 +12040,22 @@ fn take_view(state: &AppState, idx: usize) -> Option<Panel> {
         return None;
     }
     let taken = panels.remove(idx);
+    // `editor_buffers` is keyed by panel index, so every entry after the one
+    // removed has to move down with its view — otherwise the text of a note
+    // would follow the view that lands on its old index, and two views would
+    // overwrite each other's file. The removed entry is dropped first: its view
+    // is gone, and any pending edit was already saved by the caller.
+    {
+        let mut buffers = state.editor_buffers.borrow_mut();
+        buffers.remove(&idx);
+        if !buffers.is_empty() {
+            let shifted: Vec<(usize, EditorBuffer)> = buffers
+                .drain()
+                .map(|(i, b)| (if i > idx { i - 1 } else { i }, b))
+                .collect();
+            buffers.extend(shifted);
+        }
+    }
     let mut active = state.active_panel.borrow_mut();
     if *active >= panels.len() {
         *active = panels.len() - 1;
@@ -12029,7 +12234,7 @@ fn deserialize_tab(payload: &str) -> Option<(Tab, Option<(i32, i32)>)> {
             preview: p[3] == "1",
             zoom: p.get(8).and_then(|z| z.parse().ok()),
             show_hidden: p[4] == "1",
-            group_mode: GroupMode::from_code(p[5]).unwrap_or(GroupMode::FoldersFirst),
+            group_mode: GroupMode::from_code(p[5]).unwrap_or(GroupMode::ByType),
             item_arrangement: p
                 .get(9)
                 .map_or(ItemArrangement::List, |s| ItemArrangement::from_code(s)),
@@ -14750,6 +14955,27 @@ fn update_panels_ui(window: &MainWindow, state: &AppState) {
                 viewport_reset_gen: p.viewport_reset_gen.get(),
                 tabs: ModelRc::new(VecModel::from(tabs_infos)),
                 current_path: tab.current_path.display().to_string().into(),
+                // Empty for a folder view; the edited file for an editor view.
+                // The Slint side keys its editor rendering on it.
+                editor_file: p
+                    .editor_file()
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_default()
+                    .into(),
+                // The buffer and its dirty state, read from the per-view store.
+                // A folder view reports empty/false and never reads them.
+                editor_text: state
+                    .editor_buffers
+                    .borrow()
+                    .get(&i)
+                    .map(|b| b.text.clone())
+                    .unwrap_or_default()
+                    .into(),
+                editor_dirty: state
+                    .editor_buffers
+                    .borrow()
+                    .get(&i)
+                    .is_some_and(EditorBuffer::is_dirty),
                 total_count: total as i32,
                 can_go_back: tab.history.can_back(),
                 can_go_forward: tab.history.can_forward(),
@@ -14762,7 +14988,20 @@ fn update_panels_ui(window: &MainWindow, state: &AppState) {
                     .is_none_or(|s| matches!(s.order, SortOrder::Asc)),
                 group_dates_by_day: tab.sort.secondary.is_some_and(|s| s.group_dates_by_day),
                 active_tab_idx: p.tabs.active as i32,
-                title: format!("{prefix}{}{}{leaf}", i + 1, i18n::tr(lang, "separator_dot")).into(),
+                // An editor view is named after the file it edits: "Panel 1 ·
+                // Documents" would be meaningless there, and the title bar
+                // shows this string verbatim.
+                title: match p.editor_file() {
+                    Some(file) => file
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                        .into(),
+                    None => {
+                        format!("{prefix}{}{}{leaf}", i + 1, i18n::tr(lang, "separator_dot"))
+                            .into()
+                    }
+                },
                 crumbs: ModelRc::new(VecModel::from(breadcrumbs(&tab.current_path))),
                 col_name_w: col_width(&p.columns, "name"),
                 col_path_w: col_width(&p.columns, "path"),
@@ -17527,6 +17766,233 @@ fn panel_dir(state: &AppState, panel: usize) -> PathBuf {
         .unwrap_or_default()
 }
 
+/// Extensions the embedded editor accepts.
+///
+/// Two only, by product decision: plain text and Markdown. Anything else is
+/// opened the way it always was, through the system association.
+const EDITOR_EXTENSIONS: &[&str] = &["txt", "md"];
+
+/// Whether `path` is an existing file the embedded editor may host.
+fn is_text_editable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| {
+            EDITOR_EXTENSIONS
+                .iter()
+                .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+        })
+}
+
+/// Creates a NEW view dedicated to editing `file`, next to the active one.
+///
+/// The source view is left untouched: this never converts an existing folder
+/// view, which keeps its tabs, history and scroll position. The new view holds
+/// a single tab (editor views are single-file by design) and is marked as an
+/// editor through `Panel::editor`.
+/// Index of an existing editor view already editing `file`, if any.
+///
+/// Comparison is case-insensitive on Windows, where `Memo.txt` and `memo.txt`
+/// are the same file and would otherwise get two editors fighting over it.
+fn find_editor_view(state: &AppState, file: &Path) -> Option<usize> {
+    let panels = state.panels.borrow();
+    panels.iter().position(|panel| {
+        panel.editor_file().is_some_and(|open| {
+            if cfg!(windows) {
+                open.to_string_lossy()
+                    .eq_ignore_ascii_case(&file.to_string_lossy())
+            } else {
+                open == file
+            }
+        })
+    })
+}
+
+fn open_editor_view(window: &MainWindow, state: &AppState, file: PathBuf) {
+    let default_display = TabDisplayDefaults::from(&*state.config.borrow());
+    let created = {
+        let mut panels = state.panels.borrow_mut();
+        if panels.len() >= MAX_PANELS {
+            None
+        } else {
+            let active = *state.active_panel.borrow();
+            let new_idx = panels.len();
+            let split_ok = state
+                .layout
+                .borrow_mut()
+                .split_leaf(active, SplitDir::Row, new_idx, 0.5, false);
+            if split_ok {
+                // The editor view mirrors the source view's chrome so the two
+                // line up visually; its columns are irrelevant but harmless.
+                let cols = panels
+                    .get(active)
+                    .map(|p| p.columns.clone())
+                    .unwrap_or_default();
+                let mode = panels
+                    .get(active)
+                    .map(|p| p.tab_bar_mode)
+                    .unwrap_or_default();
+                panels.push(Panel::editor_view(file, cols, mode, default_display));
+                Some(new_idx)
+            } else {
+                None
+            }
+        }
+    };
+
+    if let Some(idx) = created {
+        *state.active_panel.borrow_mut() = idx;
+        // Read the file BEFORE the view is published, so its first paint
+        // already shows the text instead of flashing an empty box.
+        let target = state.panels.borrow()[idx]
+            .editor_file()
+            .map(Path::to_path_buf);
+        if let Some(target) = target {
+            if let Err(err) = load_editor_buffer(state, idx, &target) {
+                warn!(error = %err, file = %target.display(), "loading the editor buffer failed");
+                let lang = state.snapshot_config().language;
+                let key = if std::fs::metadata(&target).map(|m| m.len() > MAX_EDITOR_BYTES).unwrap_or(false)
+                {
+                    "editor_too_large"
+                } else {
+                    "editor_missing_file"
+                };
+                notice(window, i18n::tr(lang, key), NoticeKind::Error);
+                // The view exists but has nothing to edit: drop it rather than
+                // leave an empty editor with no way back to the file.
+                if take_view(state, idx).is_some() {
+                    switch_active_panel(window, state);
+                }
+                return;
+            }
+        }
+        switch_active_panel(window, state);
+        update_panels_ui(window, state);
+        state.persist_workspace();
+    }
+}
+
+/// Largest file the editor view will open.
+///
+/// `TextEdit` holds the whole document as one string and Slint lays out every
+/// line, so a big file would stall the UI thread. One megabyte is far above any
+/// note and far below anything that hurts.
+const MAX_EDITOR_BYTES: u64 = 1024 * 1024;
+
+/// Replaces the buffer of panel `idx` with the contents of `file`.
+///
+/// Decoding is LOSSY on purpose: a text file saved in a legacy code page must
+/// still open (readable in ASCII, mangled elsewhere) rather than fail outright,
+/// because the alternative is a view the user cannot reach.
+fn load_editor_buffer(state: &AppState, idx: usize, file: &Path) -> anyhow::Result<()> {
+    let len = std::fs::metadata(file)?.len();
+    if len > MAX_EDITOR_BYTES {
+        return Err(anyhow::anyhow!(
+            "file is {len} bytes, above the {MAX_EDITOR_BYTES} limit"
+        ));
+    }
+    let bytes = std::fs::read(file)?;
+    // A UTF-8 BOM would otherwise show up as a stray character before the first
+    // word, and be written back on save, doubling it every round trip.
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    let text = String::from_utf8_lossy(bytes).into_owned();
+
+    let mut buffers = state.editor_buffers.borrow_mut();
+    buffers.insert(
+        idx,
+        EditorBuffer {
+            saved: text.clone(),
+            text,
+        },
+    );
+    Ok(())
+}
+
+/// Whether the editor at `idx` has unsaved changes.
+fn editor_is_dirty(state: &AppState, idx: usize) -> bool {
+    state
+        .editor_buffers
+        .borrow()
+        .get(&idx)
+        .is_some_and(EditorBuffer::is_dirty)
+}
+
+/// Records what the user typed, without touching the disk.
+fn set_editor_text(state: &AppState, idx: usize, text: String) -> bool {
+    let mut buffers = state.editor_buffers.borrow_mut();
+    let Some(buffer) = buffers.get_mut(&idx) else {
+        return false;
+    };
+    if buffer.text == text {
+        return false;
+    }
+    buffer.text = text;
+    buffer.is_dirty()
+}
+
+/// Writes the editor at `idx` back to its file, if it differs from disk.
+///
+/// Returns `true` when something was written. A failure is reported to the user
+/// and the buffer is left dirty, so the next save (or the shutdown flush) tries
+/// again instead of silently dropping the edits.
+fn save_editor(state: &AppState, idx: usize) -> bool {
+    let (path, text, dirty) = {
+        let buffers = state.editor_buffers.borrow();
+        let Some(buffer) = buffers.get(&idx) else {
+            return false;
+        };
+        let Some(path) = state
+            .panels
+            .borrow()
+            .get(idx)
+            .and_then(|p| p.editor_file().map(Path::to_path_buf))
+        else {
+            return false;
+        };
+        (path, buffer.text.clone(), buffer.is_dirty())
+    };
+    if !dirty {
+        return false;
+    }
+
+    // Written through a sibling temporary file then renamed: a crash or a full
+    // disk mid-write would otherwise leave a truncated note where the original
+    // used to be, which is the one outcome a note-taking view must not produce.
+    let tmp = path.with_extension("favnyr-tmp");
+    let written = std::fs::write(&tmp, text.as_bytes())
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&tmp);
+        warn!(error = %err, file = %path.display(), "saving the editor buffer failed");
+        return false;
+    }
+
+    if let Some(buffer) = state.editor_buffers.borrow_mut().get_mut(&idx) {
+        buffer.saved = text;
+    }
+    true
+}
+
+/// Saves every dirty editor view. Called on application shutdown, so edits made
+/// in the last seconds before closing are not lost.
+pub fn flush_editor_views(state: &AppState) {
+    let dirty: Vec<usize> = {
+        let buffers = state.editor_buffers.borrow();
+        buffers
+            .iter()
+            .filter(|(_, b)| b.is_dirty())
+            .map(|(idx, _)| *idx)
+            .collect()
+    };
+    for idx in dirty {
+        if save_editor(state, idx) {
+            info!(panel = idx, "flushed editor buffer on shutdown");
+        }
+    }
+}
+
 /// Path of the folder at row `row` of panel `panel`, if it is one — for
 /// dropping a selection INTO a subfolder hovered during a drag.
 /// `None` if the index is out of bounds or the row isn't a folder.
@@ -17925,6 +18391,11 @@ fn build_panels(ws: WorkspaceState) -> (Vec<Panel>, LayoutNode, usize) {
     let layout = ws.layout_tree();
     let mut panels = Vec::with_capacity(ws.panels.len());
     for ps in &ws.panels {
+        // `editor_file` is persisted but deliberately not rebuilt here: a
+        // restored editor view comes back as a listing of its file's folder.
+        // Reopening the file automatically would resurrect a note that has
+        // since been deleted or renamed, and the folder is where the user can
+        // act on that.
         let mut tabs = Vec::with_capacity(ps.tabs.len());
         for ts in &ps.tabs {
             let path = resolve_restored_path(&ts.path);
@@ -19680,6 +20151,89 @@ mod tests {
         assert!(!regroup_colored_folder_panels(&state));
     }
 
+    /// The type grouping reaches the display without touching the geometry:
+    /// rows keep a dense index and consecutive bands, so hit-testing, the
+    /// rubber band and the virtualized window all keep working unchanged.
+    #[test]
+    fn type_grouping_orders_rows_without_breaking_their_bands() {
+        let annotations = favnyr_core::annotations::AnnotationStore::default();
+        let mut entries = vec![
+            Entry {
+                name: "notes.txt".into(),
+                path: PathBuf::from("root/notes.txt"),
+                size_bytes: Some(0),
+                mtime_unix: None,
+                created_unix: None,
+                is_dir: false,
+                kind: favnyr_core::fs::classify_kind(Some("txt"), false),
+                hidden: false,
+                is_symlink: false,
+                executable: false,
+            },
+            Entry {
+                name: "photo.png".into(),
+                path: PathBuf::from("root/photo.png"),
+                size_bytes: Some(0),
+                mtime_unix: None,
+                created_unix: None,
+                is_dir: false,
+                kind: favnyr_core::fs::classify_kind(Some("png"), false),
+                hidden: false,
+                is_symlink: false,
+                executable: false,
+            },
+            Entry {
+                name: "folder".into(),
+                path: PathBuf::from("root/folder"),
+                size_bytes: None,
+                mtime_unix: None,
+                created_unix: None,
+                is_dir: true,
+                kind: favnyr_core::fs::classify_kind(None, true),
+                hidden: false,
+                is_symlink: false,
+                executable: false,
+            },
+        ];
+        // Sorted exactly where `refresh_listing` sorts, before the rows exist.
+        rfs::sort_with_secondary(
+            &mut entries,
+            SortColumn::Name,
+            SortOrder::Asc,
+            GroupMode::ByType,
+            None,
+            mtime_offset(),
+        );
+        let rows = entries_to_rows(
+            &entries,
+            "root",
+            &RowContext {
+                lang: Lang::En,
+                now_unix: 0,
+                big_icon: false,
+                grid: false,
+                zoom: 0,
+                compact_icon_rows: false,
+                item_spacing: 0,
+                group_mode: GroupMode::ByType,
+                annotations: &annotations,
+            },
+        );
+        // Folder, then the image, then the document.
+        assert_eq!(
+            rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            ["folder", "photo.png", "notes.txt"]
+        );
+        // Dense indices and contiguous bands: the shared geometry contract.
+        let mut expected_y = 0.0;
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(row.model_index, index as i32);
+            assert!((row.visual_y - expected_y).abs() < f32::EPSILON);
+            assert!(row.visual_h > 0.0);
+            expected_y += row.visual_h;
+        }
+    }
+
     #[test]
     fn folder_navigation_requires_exactly_one_directory() {
         let root =
@@ -21318,6 +21872,7 @@ mod tests {
             columns: columns::default_columns(),
             tab_bar_mode: 0,
             vbar_width: 0.0,
+            editor_file: None,
         }
     }
 

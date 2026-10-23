@@ -576,6 +576,9 @@ fn main() -> Result<()> {
     );
     window.run().context("Slint event loop failed")?;
 
+    // Editor views hold unsaved text: flush them before the process goes away.
+    bridge::flush_editor_views(&state);
+
     // Persistence on close: window size (config) + panel/tab layout
     // (workspace). SKIPPED for a folder launch or detached instance: it is
     // ephemeral and would otherwise overwrite the main instance's config/workspace

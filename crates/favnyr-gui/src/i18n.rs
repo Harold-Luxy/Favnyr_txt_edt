@@ -236,6 +236,7 @@ fn apply_catalog(window: &MainWindow, c: &HashMap<String, String>) {
     strings.set_group_folders_first(g("group_folders_first"));
     strings.set_group_colored_folders_first(g("group_colored_folders_first"));
     strings.set_group_files_first(g("group_files_first"));
+    strings.set_group_by_type(g("group_by_type"));
     strings.set_group_mixed(g("group_mixed"));
     strings.set_tab_new_tooltip(g("tab_new_tooltip"));
     strings.set_tab_scroll_left(g("tab_scroll_left"));
@@ -310,6 +311,7 @@ fn apply_catalog(window: &MainWindow, c: &HashMap<String, String>) {
     strings.set_create_confirm(g("create_confirm"));
     strings.set_create_placeholder(g("create_placeholder"));
     strings.set_ctx_open_terminal(g("ctx_open_terminal"));
+    strings.set_ctx_open_in_editor(g("ctx_open_in_editor"));
     strings.set_ctx_copy(g("ctx_copy"));
     strings.set_ctx_cut(g("ctx_cut"));
     strings.set_ctx_paste(g("ctx_paste"));

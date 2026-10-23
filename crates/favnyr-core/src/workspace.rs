@@ -94,8 +94,12 @@ pub struct TabState {
     pub grid_zoom: Option<i32>,
 }
 
+/// Default grouping for a tab that carries none — a workspace saved before
+/// the field existed, and every freshly created view. Type sections are the
+/// default: a folder reads better split by kind than by a single
+/// folder/file cut.
 fn default_group_mode() -> GroupMode {
-    GroupMode::FoldersFirst
+    GroupMode::ByType
 }
 
 fn default_sort_column() -> SortColumn {
@@ -127,6 +131,15 @@ pub struct ViewState {
     /// view.
     #[serde(default)]
     pub vbar_width: f32,
+    /// FILE an editor view edits, when this view is one.
+    ///
+    /// Kept in the workspace so the saved layout stays truthful about what the
+    /// window held, but a restore deliberately does NOT rebuild the editor: the
+    /// view comes back as an ordinary listing of the file's folder. That is the
+    /// behaviour a reopened workspace has always had for a file it cannot show,
+    /// and it means a deleted or renamed note never leaves a dead view behind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_file: Option<String>,
 }
 
 fn default_stretch() -> f32 {
@@ -274,7 +287,7 @@ impl WorkspaceState {
                     secondary_sort: None,
                     preview: false,
                     show_hidden: false,
-                    group_mode: GroupMode::FoldersFirst,
+                    group_mode: default_group_mode(),
                     zoom: None,
                     item_arrangement: ItemArrangement::List,
                     grid_zoom: None,
@@ -282,6 +295,7 @@ impl WorkspaceState {
                 columns: crate::columns::default_columns(),
                 tab_bar_mode: 0,
                 vbar_width: 0.0,
+                editor_file: None,
             });
         }
         for p in &mut self.panels {
@@ -584,6 +598,7 @@ mod tests {
                     columns: crate::columns::default_columns(),
                     tab_bar_mode: 0,
                     vbar_width: 0.0,
+                    editor_file: None,
                 },
                 ViewState {
                     stretch: 1.0,
@@ -617,6 +632,7 @@ mod tests {
                     columns: crate::columns::default_columns(),
                     tab_bar_mode: 0,
                     vbar_width: 0.0,
+                    editor_file: None,
                 },
             ],
             layout: None,
@@ -856,6 +872,31 @@ item_arrangement = "future"
         assert_eq!(restored.closed_tabs, ws.closed_tabs);
     }
 
+    /// Type sections are the default for every new view and for a workspace
+    /// saved before the field existed. Pinned so a future mode cannot quietly
+    /// become the opening state.
+    #[test]
+    fn grouping_defaults_to_type_sections() {
+        assert_eq!(default_group_mode(), GroupMode::ByType);
+
+        // A tab state without `group_mode` — what an older workspace holds.
+        let legacy: TabState = toml::from_str("path = '/tmp'").unwrap();
+        assert_eq!(legacy.group_mode, GroupMode::ByType);
+
+        // A workspace with no usable panel: `sanitized` rebuilds a minimal
+        // one, which must carry the same default.
+        let rebuilt = WorkspaceState {
+            active_panel: 0,
+            panels: Vec::new(),
+            layout: None,
+            workspace_name: None,
+            closed_tabs: Vec::new(),
+            sidebar_sections: SidebarSectionsState::default(),
+        }
+        .sanitized();
+        assert_eq!(rebuilt.panels[0].tabs[0].group_mode, GroupMode::ByType);
+    }
+
     #[test]
     fn sidebar_sections_are_backward_compatible_and_persisted() {
         // The historical "all expanded" state stays absent from the TOML and
@@ -943,6 +984,7 @@ item_arrangement = "future"
                 columns: crate::columns::default_columns(),
                 tab_bar_mode: 0,
                 vbar_width: 0.0,
+                editor_file: None,
             }],
             layout: None,
             workspace_name: None,
@@ -967,6 +1009,7 @@ item_arrangement = "future"
                     columns: crate::columns::default_columns(),
                     tab_bar_mode: 0,
                     vbar_width: 0.0,
+                    editor_file: None,
                 },
                 ViewState {
                     stretch: 1.0,
@@ -986,6 +1029,7 @@ item_arrangement = "future"
                     columns: crate::columns::default_columns(),
                     tab_bar_mode: 0,
                     vbar_width: 0.0,
+                    editor_file: None,
                 },
             ],
             layout: None,
@@ -1131,6 +1175,7 @@ name =",
                 columns: crate::columns::default_columns(),
                 tab_bar_mode: 0,
                 vbar_width: 0.0,
+                editor_file: None,
             }],
             layout: None,
             workspace_name: None,
