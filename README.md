@@ -4,6 +4,7 @@
 
 
 ### 1. sort by type
+<img width="450" height="438" alt="4" src="https://github.com/user-attachments/assets/c4f29617-d8af-4446-9154-5ec87622a028" />
 
 ### 2. editor window
 Now you can right click a .txt/md file and open it as a window of Favnyr.
