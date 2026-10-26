@@ -9562,7 +9562,13 @@ fn regroup_colored_folder_panels(state: &AppState) -> bool {
             .as_deref()
             .and_then(|path| rows.iter().position(|row| row_path(row) == path))
             .map_or(-1, |index| index as i32);
-        layout_rows(&mut rows, tab.zoom, compact_icon_rows, item_spacing);
+        layout_rows(
+            &mut rows,
+            tab.zoom,
+            compact_icon_rows,
+            item_spacing,
+            separates_type_sections(tab),
+        );
         panel.replace_rows(rows);
         regrouped = true;
     }
@@ -16690,14 +16696,43 @@ fn effective_row_height(preview_capable: bool, zoom: i32, compact_icon_rows: boo
     }
 }
 
+/// Vertical space inserted before a new TYPE section, in logical pixels.
+///
+/// Part of `visual_y` rather than a decoration drawn on top: every consumer
+/// (rendering, hit-testing, scrolling, virtualisation, rubber band) reads this
+/// one array, so the gap is consistent for all of them the instant it is laid
+/// out — there is no second formula to keep in step.
+const GROUP_GAP: f32 = 16.0;
+
 /// Computes the full vertical geometry once. The same values are
 /// then consumed by Slint and by all the Rust hit-tests: no parallel
 /// formula can drift when the heights become heterogeneous.
-fn layout_rows(rows: &mut [FileRow], zoom: i32, compact_icon_rows: bool, item_spacing: i32) {
+///
+/// `separate_groups` inserts `GROUP_GAP` before each new type section. It is
+/// set only for `GroupMode::ByType`, whose sort guarantees that entries of the
+/// same kind are contiguous: comparing each row's `kind` with the previous one
+/// therefore finds every section boundary without the core having to publish
+/// any grouping metadata.
+fn layout_rows(
+    rows: &mut [FileRow],
+    zoom: i32,
+    compact_icon_rows: bool,
+    item_spacing: i32,
+    separate_groups: bool,
+) {
     let item_spacing = item_spacing.clamp(MIN_VIEW_ITEM_SPACING, MAX_VIEW_ITEM_SPACING) as f32;
     let mut y = 0.0_f32;
+    // `None` before the first row: the first section never opens with a gap,
+    // which would otherwise push the whole list down for no reason.
+    let mut previous_kind: Option<i32> = None;
     for (index, row) in rows.iter_mut().enumerate() {
         row.model_index = index as i32;
+        let starts_section = separate_groups && previous_kind.is_some_and(|k| k != row.kind);
+        row.group_start = starts_section;
+        if starts_section {
+            y += GROUP_GAP;
+        }
+        previous_kind = Some(row.kind);
         row.visual_y = y;
         row.visual_h =
             effective_row_height(row.preview_capable, zoom, compact_icon_rows) + item_spacing;
@@ -16711,6 +16746,19 @@ fn item_band(row: &FileRow) -> ItemBand {
         top: row.visual_y,
         height: row.visual_h,
     }
+}
+
+/// Whether this tab should show the type-section gap and hairline.
+///
+/// Two conditions, and both matter:
+///
+/// - `ByType` is the only grouping whose sort keeps kinds contiguous, which is
+///   what lets `layout_rows` find the boundaries by comparing neighbours.
+/// - Only the LIST arrangement is laid out by `layout_rows`. The grid computes
+///   its own 2D geometry and never reads `visual_y`, so asking for the gap there
+///   would shift the virtualisation bands for no visible benefit.
+fn separates_type_sections(tab: &Tab) -> bool {
+    tab.group_mode == GroupMode::ByType && tab.item_arrangement == ItemArrangement::List
 }
 
 /// Read geometry directly from the live model without cloning the collection.
@@ -16840,7 +16888,13 @@ fn zoom_panel_visuals(
         refresh_rows_visuals(&mut rows, preview, compact_icon_rows, false);
     }
 
-    layout_rows(&mut rows, zoom, compact_icon_rows, item_spacing);
+    layout_rows(
+        &mut rows,
+        zoom,
+        compact_icon_rows,
+        item_spacing,
+        separates_type_sections(&panel.tabs.tabs[panel.tabs.active]),
+    );
     let geometry_changed = rows.iter().zip(previous).any(|(row, (y, h))| {
         (row.visual_y - y).abs() > f32::EPSILON || (row.visual_h - h).abs() > f32::EPSILON
     });
@@ -16886,7 +16940,13 @@ fn refresh_panel_visuals(
         .collect();
     let grid = panel.tabs.tabs[panel.tabs.active].item_arrangement == ItemArrangement::Grid;
     refresh_rows_visuals(&mut rows, preview, compact_icon_rows, grid);
-    layout_rows(&mut rows, zoom, compact_icon_rows, item_spacing);
+    layout_rows(
+        &mut rows,
+        zoom,
+        compact_icon_rows,
+        item_spacing,
+        separates_type_sections(&panel.tabs.tabs[panel.tabs.active]),
+    );
     panel.replace_rows(rows);
 }
 
@@ -16925,7 +16985,13 @@ fn refresh_view_item_spacing(window: &MainWindow, state: &AppState) {
             }
             let zoom = panel.tabs.tabs[panel.tabs.active].zoom;
             let mut rows: Vec<FileRow> = panel.rows_model.iter().collect();
-            layout_rows(&mut rows, zoom, compact_icon_rows, item_spacing);
+            layout_rows(
+                &mut rows,
+                zoom,
+                compact_icon_rows,
+                item_spacing,
+                separates_type_sections(&panel.tabs.tabs[panel.tabs.active]),
+            );
             panel.replace_rows(rows);
         }
     }
@@ -17410,6 +17476,7 @@ fn entry_to_row(e: &Entry, parent_display: &str, ctx: &RowContext) -> FileRow {
         visual_y: 0.0,
         visual_h: COMPACT_ICON_ROW_HEIGHT,
         model_index: 0,
+        group_start: false,
         rendered: false,
     }
 }
@@ -17420,6 +17487,7 @@ fn entries_to_rows(entries: &[Entry], parent_display: &str, ctx: &RowContext) ->
         compact_icon_rows,
         item_spacing,
         group_mode,
+        grid,
         ..
     } = *ctx;
     let mut rows: Vec<FileRow> = entries
@@ -17429,7 +17497,15 @@ fn entries_to_rows(entries: &[Entry], parent_display: &str, ctx: &RowContext) ->
     if group_mode == GroupMode::ColoredFoldersFirst {
         group_colored_folder_rows(&mut rows);
     }
-    layout_rows(&mut rows, zoom, compact_icon_rows, item_spacing);
+    layout_rows(
+        &mut rows,
+        zoom,
+        compact_icon_rows,
+        item_spacing,
+        // Same rule as `separates_type_sections`, spelled out here because this
+        // path only has the context, not the tab.
+        group_mode == GroupMode::ByType && !grid,
+    );
     rows
 }
 
@@ -18203,7 +18279,13 @@ fn perform_manual_reorder(
             .and_then(|index| previous.get(index))
             .cloned();
         let zoom = panel.tabs.tabs[active].zoom;
-        layout_rows(&mut rows, zoom, compact_icon_rows, item_spacing);
+        layout_rows(
+            &mut rows,
+            zoom,
+            compact_icon_rows,
+            item_spacing,
+            separates_type_sections(&panel.tabs.tabs[active]),
+        );
 
         let visible: HashSet<&str> = previous.iter().map(String::as_str).collect();
         let mut replacement = next.iter();
@@ -19082,7 +19164,7 @@ mod tests {
         panel.viewport_top.set(600.0);
         panel.viewport_height.set(400.0);
         let mut rows = vec![FileRow::default(); 300];
-        layout_rows(&mut rows, 0, true, 0);
+        layout_rows(&mut rows, 0, true, 0, false);
         panel.replace_rows(rows);
         let model = panel.rows_model.clone();
         let revision = panel.rows_revision.get();
@@ -19124,7 +19206,7 @@ mod tests {
         panel.viewport_top.set(25_000.0);
         panel.viewport_height.set(400.0);
         let mut rows = vec![FileRow::default(); 10_000];
-        layout_rows(&mut rows, 2, true, 0);
+        layout_rows(&mut rows, 2, true, 0, false);
         panel.replace_rows(rows);
         let expected = panel
             .item_grid
@@ -20129,6 +20211,7 @@ mod tests {
                 tab.zoom,
                 state.config.borrow().compact_icon_rows_in_preview,
                 state.config.borrow().view_item_spacing,
+                false,
             );
             panel.replace_rows(rows);
         }
@@ -20225,9 +20308,18 @@ mod tests {
             ["folder", "photo.png", "notes.txt"]
         );
         // Dense indices and contiguous bands: the shared geometry contract.
+        // A section boundary adds `GROUP_GAP` to the band, so the expected
+        // position is the running total PLUS one gap per section opened.
         let mut expected_y = 0.0;
+        let mut previous_kind: Option<i32> = None;
         for (index, row) in rows.iter().enumerate() {
             assert_eq!(row.model_index, index as i32);
+            let starts_section = previous_kind.is_some_and(|kind| kind != row.kind);
+            assert_eq!(row.group_start, starts_section);
+            if starts_section {
+                expected_y += GROUP_GAP;
+            }
+            previous_kind = Some(row.kind);
             assert!((row.visual_y - expected_y).abs() < f32::EPSILON);
             assert!(row.visual_h > 0.0);
             expected_y += row.visual_h;
@@ -20629,7 +20721,7 @@ mod tests {
                     ..Default::default()
                 })
                 .collect();
-            layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+            layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
             let top = rows[50].visual_y;
             let height = rows[50].visual_h * 2.0;
             let range = slice_geometry(&rows).visible_range(top, top + height);
@@ -20694,7 +20786,7 @@ mod tests {
                     ..Default::default()
                 })
                 .collect();
-            layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+            layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
             panel.replace_rows(rows);
         }
         for index in 0..40 {
@@ -20910,7 +21002,7 @@ mod tests {
         let mut rows = vec![FileRow::default(), FileRow::default()];
         let content_height = effective_row_height(false, LIST_DEFAULT_ZOOM, false);
 
-        layout_rows(&mut rows, LIST_DEFAULT_ZOOM, false, 8);
+        layout_rows(&mut rows, LIST_DEFAULT_ZOOM, false, 8, false);
 
         assert_eq!(rows[0].visual_h, content_height + 8.0);
         assert_eq!(rows[1].visual_y, content_height + 8.0);
@@ -20935,7 +21027,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, false, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, false, 0, false);
         let viewport = ZoomViewport {
             top: rows[20].visual_y + 10.0,
             height: 420.0,
@@ -20975,7 +21067,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
         let top = rows[30].visual_y;
         let height = 360.0;
         let pointer_y = 95.0;
@@ -20984,7 +21076,7 @@ mod tests {
         let anchor = capture_zoom_anchor(&rows, top, height, pointer_y).unwrap();
         assert_eq!(anchor.index, expected_row);
 
-        layout_rows(&mut rows, MAX_ZOOM, true, 0);
+        layout_rows(&mut rows, MAX_ZOOM, true, 0, false);
         let new_top = restore_zoom_viewport_top(&rows, Some(anchor), top, height);
         let row = &rows[anchor.index];
         let restored_pointer_y = row.visual_y + row.visual_h * anchor.fraction - new_top;
@@ -21012,14 +21104,14 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        layout_rows(&mut rows, LIST_DEFAULT_ZOOM, false, 0);
+        layout_rows(&mut rows, LIST_DEFAULT_ZOOM, false, 0, false);
         let viewport_height = 500.0;
         // The pointer is in the blank space below the 280 px of content; the center
         // (250 px), however, stays on a valid row.
         let anchor = capture_zoom_anchor(&rows, 0.0, viewport_height, 450.0).unwrap();
         assert_eq!(anchor.viewport_y, viewport_height * 0.5);
 
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, false, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, false, 0, false);
         let top = restore_zoom_viewport_top(&rows, Some(anchor), 0.0, viewport_height);
         let row = &rows[anchor.index];
         let max_top =
@@ -21030,7 +21122,7 @@ mod tests {
 
         // If the content fits in the view again, no negative position or
         // one above the maximum can leak out to the Slint scrollbar.
-        layout_rows(&mut rows, LIST_DEFAULT_ZOOM, false, 0);
+        layout_rows(&mut rows, LIST_DEFAULT_ZOOM, false, 0, false);
         assert_eq!(
             restore_zoom_viewport_top(&rows, Some(anchor), 9_999.0, viewport_height),
             0.0
@@ -21053,7 +21145,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
         let model = VecModel::from(rows);
 
         assert_eq!(row_index_at_content_y(&model, 75.0), 0);
@@ -21072,7 +21164,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
         let total_height = rows.last().map(|row| row.visual_y + row.visual_h).unwrap();
         let model = VecModel::from(rows.clone());
 
@@ -21104,7 +21196,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
         let top = rows[8_500].visual_y;
         let height = 720.0;
         let range = slice_geometry(&rows).visible_range(top - height, top + height * 2.0);
@@ -21148,7 +21240,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
         let top = rows[80].visual_y;
         let (first, end) = mark_render_window(&mut rows, top, 300.0, None);
         rows_model.set_vec(rows);
@@ -21179,7 +21271,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
         panel.viewport_top.set(rows[1_500].visual_y);
         panel.viewport_height.set(600.0);
         panel.replace_rows(rows.clone());
@@ -21202,7 +21294,7 @@ mod tests {
                 ..Default::default()
             })
             .collect();
-        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0);
+        layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 0, false);
         let model = VecModel::from(rows);
         let base = snapshot_selection(&model);
 

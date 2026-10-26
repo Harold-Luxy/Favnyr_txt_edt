@@ -489,6 +489,8 @@ fn append(state: &AppState, index: usize) {
         tab.zoom,
         config.compact_icon_rows_in_preview,
         config.view_item_spacing,
+        // Search results are a flat list, never sorted into type sections.
+        false,
     );
     let clip = state.clipboard.borrow();
     for row in &mut rows {
@@ -575,6 +577,8 @@ fn reorder_panel(panel: &mut Panel, config: &Config) {
         tab.zoom,
         config.compact_icon_rows_in_preview,
         config.view_item_spacing,
+        // Search results are a flat list, never sorted into type sections.
+        false,
     );
     let tab = &mut panel.tabs.tabs[panel.tabs.active];
     let previous_cursor = tab.cursor;
@@ -899,7 +903,7 @@ mod tests {
                         ..Default::default()
                     })
                     .collect();
-                layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 4);
+                layout_rows(&mut rows, THUMB_DEFAULT_ZOOM, true, 4, false);
                 append_rows(&panel, rows);
             }
             assert!(Rc::ptr_eq(&panel.rows_model, &initial_model));

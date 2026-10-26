@@ -245,6 +245,11 @@ export struct FileRow {
     // source for rendering, hit-testing, keyboard scrolling, and rubber-band selection.
     visual-y: length,
     visual-h: length,
+    // First row of a TYPE section (`GroupMode::ByType` only). The bridge inserts
+    // the extra section gap directly into `visual-y`, so this flag only tells
+    // the renderer to draw the hairline: the space itself is already part of
+    // the geometry every hit-test reads.
+    group-start: bool,
     // Index in the full logical model. `rendered` only drives the
     // virtualized window: neither one participates in operations.
     model-index: int,
@@ -1811,6 +1816,10 @@ component FileItemView inherits Rectangle {
     in property <string> depth;           // "32-bit +A" (optional column)
     in property <string> ext;             // extension without the dot (optional column)
     in property <bool> grid-mode: false;
+    // First row of a type section (`GroupMode::ByType`, list arrangement only).
+    // The vertical space above it is already part of `visual-y`, so this flag
+    // only draws the hairline that makes the boundary visible.
+    in property <bool> group-start: false;
     in property <bool> preview-mode;     // preview mode (thumbnails)
     in property <length> row-h: 28px;    // content height + optional spacing
     in property <int> item-spacing: 0;
@@ -1915,6 +1924,18 @@ component FileItemView inherits Rectangle {
     // A cut row remains globally faded to preserve the existing semantics.
     // Hidden fading is handled per primitive above and never stacks with it.
     opacity: root.cut ? 0.45 : 1.0;
+
+    // Type-section hairline, drawn in the gap the bridge already reserved above
+    // this row. Negative `y` is safe because a list row does not clip (only the
+    // grid does, and the grid never asks for sections). The line is inset like
+    // the selection pill so it reads as a separator rather than a border.
+    if root.group-start && !root.grid-mode : Rectangle {
+        x: Tokens.gutter;
+        y: -9px;
+        width: max(0px, parent.width - Tokens.gutter - 8px);
+        height: 1px;
+        background: Theme.border;
+    }
 
     // Highlight (selection / hover) as a rounded PILL, inset from
     // the gutter on the left (which stays blank) and a small margin on the right
@@ -6311,6 +6332,7 @@ component PanelComponent inherits Rectangle {
                     y: root.view.grid-mode ? self.grid-rect.top : entry.visual-y;
                     width: root.view.grid-mode ? self.grid-rect.width : rows-scroll.width;
                     grid-mode: root.view.grid-mode;
+                    group-start: entry.group-start;
                     name: entry.name;
                     name-base: entry.name-base;
                     name-ext: entry.name-ext;
