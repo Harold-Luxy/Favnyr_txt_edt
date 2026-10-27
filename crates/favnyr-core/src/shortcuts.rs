@@ -260,6 +260,30 @@ pub const ACTIONS: &[ActionDef] = &[
         group: ActionGroup::FileOps,
         default: "Alt+Enter",
     },
+    // The three below were context-menu only. They get bindings because they
+    // are the file operations a user repeats most on a selection, where going
+    // back to the right-click menu costs the most.
+    ActionDef {
+        id: "copy-path",
+        group: ActionGroup::FileOps,
+        // Ctrl+Shift+C: the same "copy something else about the selection"
+        // slot other file managers use, and free here (Ctrl+C copies the files).
+        default: "Ctrl+Shift+C",
+    },
+    ActionDef {
+        id: "copy-name",
+        group: ActionGroup::FileOps,
+        // Ctrl+Shift+N belongs to "new folder", so the sibling of copy-path
+        // moves to the Alt row.
+        default: "Ctrl+Alt+C",
+    },
+    ActionDef {
+        id: "reveal",
+        group: ActionGroup::FileOps,
+        // Ctrl+Shift+E, "E" for explorer: free, and adjacent to nothing that
+        // could be hit by accident.
+        default: "Ctrl+Shift+E",
+    },
     // ----- View options -----
     ActionDef {
         id: "toggle-hidden",

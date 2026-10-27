@@ -11355,6 +11355,10 @@ export component MainWindow inherits Window {
         if (id == "new-file") { root.create-kind = 1; root.create-name = ""; root.create-target = ""; root.create-popup-open = root.search-root-action-allowed(); return; }
         if (id == "terminal") { root.action-open-terminal(); return; }
         if (id == "properties") { root.action-properties(); return; }
+        // The three context-menu file operations that also have a binding.
+        if (id == "copy-path") { root.action-copy-path(); return; }
+        if (id == "copy-name") { root.action-copy-name(); return; }
+        if (id == "reveal") { root.action-open-parent(); return; }
         // Display options
         if (id == "toggle-hidden") { root.toggle-show-hidden(root.active-panel-idx); return; }
         if (id == "cycle-group") {
