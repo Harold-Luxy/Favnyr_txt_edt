@@ -277,6 +277,8 @@ fn apply_catalog(window: &MainWindow, c: &HashMap<String, String>) {
     strings.set_settings_annotations_cleaned(g("settings_annotations_cleaned"));
     strings.set_tab_unavailable(g("tab_unavailable"));
     strings.set_tab_unavailable_hint(g("tab_unavailable_hint"));
+    strings.set_tab_unavailable_file(g("tab_unavailable_file"));
+    strings.set_tab_unavailable_file_hint(g("tab_unavailable_file_hint"));
     strings.set_tab_duplicate(g("tab_duplicate"));
     strings.set_tab_reopen_closed(g("tab_reopen_closed"));
     strings.set_tab_close_tooltip(g("tab_close_tooltip"));

@@ -588,6 +588,10 @@ export global Strings {
     in-out property <string> tabbar-right;          // … vertical bar on the right option
     in-out property <string> tab-unavailable;       // folder-not-found banner
     in-out property <string> tab-unavailable-hint;
+    // Same banner, for an editor view whose file is gone. Separate wording
+    // because "folder not found" would be wrong about what is missing.
+    in-out property <string> tab-unavailable-file;
+    in-out property <string> tab-unavailable-file-hint;
     in-out property <string> tab-duplicate;         // tab context menu: duplicate
     in-out property <string> tab-reopen-closed;     // dead-zone menu: last closed tab
     in-out property <string> tab-close-tooltip;
@@ -3937,6 +3941,10 @@ component EmbeddedEditorPanel inherits Rectangle {
     in property <bool> dirty: false;
     // Current buffer. Two-way with the edit box below.
     in-out property <string> text: "";
+    // The file behind this view could not be read (deleted, renamed, moved).
+    // Same contract as a folder view's "not found": the view stays, names what
+    // is missing, and closing it is the way out.
+    in property <bool> unavailable: false;
     // This view is the source of the ongoing view drag (turns the grip's
     // cursor into a grabbing hand, like a folder view's).
     in property <bool> view-dragging: false;
@@ -4193,6 +4201,10 @@ component EmbeddedEditorPanel inherits Rectangle {
         clip: true;
 
         editor := TextEdit {
+            // Hidden rather than merely covered: a buffer with no file behind it
+            // must not accept typing, or the user would believe the edit was
+            // being kept somewhere.
+            visible: !root.unavailable;
             // TextEdit is not a layout element, so the breathing room around the
             // text is an inset on the box itself rather than padding. Kept to a
             // hairline: the widget already pads its own text, and anything more
@@ -4202,7 +4214,17 @@ component EmbeddedEditorPanel inherits Rectangle {
             width: max(0px, parent.width - 4px);
             height: max(0px, parent.height - 4px);
             text <=> root.text;
-            wrap: no-wrap;
+            // Soft wrap: a line wider than the view continues on the next
+            // VISUAL line. The text itself is untouched, so saving writes the
+            // original single-line content back. `word-wrap` breaks at word
+            // boundaries when there is one and falls back to an arbitrary
+            // position for very long runs (paths, URLs, base64), which is what
+            // keeps CJK text and unbroken identifiers from spilling out.
+            //
+            // Wrapping also makes the content width equal the visible width, so
+            // no horizontal scrolling is possible any more — the whole line is
+            // always reachable by scrolling vertically.
+            wrap: word-wrap;
             font-size: 14px;
             edited => { root.text-changed(editor.text); }
             key-pressed(event) => {
@@ -4217,6 +4239,57 @@ component EmbeddedEditorPanel inherits Rectangle {
             changed has-focus => {
                 // Focus left the edit box: the blur save policy applies.
                 if (!self.has-focus) { root.blur-requested(); }
+            }
+        }
+
+        // ----- File not found -----
+        // Laid out exactly like a folder view's banner (left-aligned block, the
+        // whole surface replaced) so the two states read the same.
+        if root.unavailable : Rectangle {
+            x: 0px;
+            y: 0px;
+            width: parent.width;
+            height: parent.height;
+            background: Theme.background;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 7px;
+                padding-left: 22px;
+                padding-right: 22px;
+                padding-top: 24px;
+                padding-bottom: 24px;
+                HorizontalLayout {
+                    alignment: start;
+                    Image {
+                        source: @image-url("../../assets/icons/file.svg");
+                        width: 24px;
+                        height: 24px;
+                        colorize: Tokens.danger;
+                    }
+                }
+                Text {
+                    text: Strings.tab-unavailable-file;
+                    font-size: 14px;
+                    font-weight: 700;
+                    color: Theme.foreground;
+                    horizontal-alignment: left;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.file-path;
+                    font-size: 12px;
+                    color: Theme.foreground.with-alpha(0.65);
+                    horizontal-alignment: left;
+                    overflow: elide;
+                }
+                Text {
+                    text: Strings.tab-unavailable-file-hint;
+                    font-size: 11px;
+                    color: Theme.foreground.with-alpha(0.5);
+                    horizontal-alignment: left;
+                    wrap: word-wrap;
+                }
             }
         }
     }
@@ -7533,6 +7606,7 @@ component PanelComponent inherits Rectangle {
         can-close: root.can-close;
         dirty: root.view.editor-dirty;
         text: root.view.editor-text;
+        unavailable: root.view.unavailable;
         view-dragging: root.view-drag-is-source;
         close-requested => { root.close-panel(); }
         text-changed(t) => { root.editor-text-changed(t); }

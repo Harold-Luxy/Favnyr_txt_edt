@@ -1607,6 +1607,40 @@ impl AppState {
         *self.active_panel.borrow_mut() = active_panel;
         *self.closed_tabs.borrow_mut() = closed_tabs;
         self.sidebar_sections.set(sidebar_sections);
+        // Buffers are keyed by panel index and the panel set just changed
+        // wholesale: rebuild them from the restored views' files.
+        self.reload_editor_buffers();
+    }
+
+    /// Rebuilds the editor buffers from the views that currently exist.
+    ///
+    /// Called after the whole panel set is replaced. A file that cannot be read
+    /// (deleted, renamed, grown past the size limit) marks its view unavailable
+    /// instead of dropping it: the banner names the missing file and the view
+    /// closes like any other.
+    fn reload_editor_buffers(&self) {
+        self.editor_buffers.borrow_mut().clear();
+        let editors: Vec<(usize, PathBuf)> = {
+            let panels = self.panels.borrow();
+            panels
+                .iter()
+                .enumerate()
+                .filter_map(|(index, panel)| panel.editor_file().map(|f| (index, f.to_path_buf())))
+                .collect()
+        };
+        for (index, file) in editors {
+            let loaded = load_editor_buffer(self, index, &file);
+            if let Err(err) = &loaded {
+                warn!(
+                    error = %err,
+                    file = %file.display(),
+                    "restoring editor view failed"
+                );
+            }
+            if let Some(panel) = self.panels.borrow_mut().get_mut(index) {
+                panel.unavailable = loaded.is_err();
+            }
+        }
     }
 
     /// Resets the layout to the "blank" first-launch state:
@@ -1627,6 +1661,9 @@ impl AppState {
         )];
         *self.layout.borrow_mut() = LayoutNode::Leaf { panel: 0 };
         *self.active_panel.borrow_mut() = 0;
+        // Every editor view is gone with the old layout: their buffers would
+        // otherwise be reloaded against panel 0 on the next save attempt.
+        self.editor_buffers.borrow_mut().clear();
         self.closed_tabs.borrow_mut().clear();
         self.external_drop_paths.borrow_mut().clear();
         *self.pending_file_drop.borrow_mut() = None;
@@ -8032,6 +8069,11 @@ fn overwrite_named_from_live(state: &AppState, id: &str) -> favnyr_core::Result<
 /// Loads the named workspace `id` (replaces the layout, repopulates, refreshes,
 /// persists, updates the title). All workspace loading paths converge here.
 fn load_named_into(window: &MainWindow, state: &AppState, id: &str) {
+    // The editor buffers belong to the layout that is about to be replaced:
+    // flush them first. Switching workspaces is also a blur — the views leave
+    // the screen — so the same policy that saves when a view loses focus saves
+    // here, and nothing typed is lost by hopping between workspaces.
+    flush_editor_views(state);
     match workspace::load_named_workspace(&paths::workspaces_dir(), id) {
         Ok((name, ws)) => {
             info!(id = %id, name, "workspace loaded");
@@ -11665,6 +11707,20 @@ fn apply_initial_listing(
     }
 }
 
+/// Whether panel `index` is an editor view.
+///
+/// Editor views keep a tab pointing at their file's folder, so everything that
+/// walks the panels by path would treat them as folder views and list a folder
+/// nobody looks at — or, worse, would clear the "file not found" state that is
+/// about the file rather than the folder.
+fn is_editor_panel(state: &AppState, index: usize) -> bool {
+    state
+        .panels
+        .borrow()
+        .get(index)
+        .is_some_and(|panel| panel.editor_file().is_some())
+}
+
 /// Refreshes each panel after a potentially multi-view operation.
 /// Local folders are re-read directly; any network path, even in
 /// a non-active split, goes through the async worker. The active panel keeps the
@@ -11690,9 +11746,13 @@ fn refresh_all_panels(window: &MainWindow, state: &AppState) {
         .filter(|&index| search::restart(window, state, index))
         .collect();
     // First re-read the local panels without publishing the UI between each one.
+    // Editor views are skipped: they render no rows, so listing their folder
+    // would be pure I/O — and worse, a successful listing would clear the
+    // "file not found" state that belongs to the FILE, not to the folder.
     for (index, path) in paths.iter().enumerate() {
         if index != active_idx
             && !searching.contains(&index)
+            && !is_editor_panel(state, index)
             && !favnyr_core::places::is_network_path(path)
             && !rfs::is_unc_path(path)
         {
@@ -11705,6 +11765,7 @@ fn refresh_all_panels(window: &MainWindow, state: &AppState) {
     for (index, path) in paths.iter().enumerate() {
         if index != active_idx
             && !searching.contains(&index)
+            && !is_editor_panel(state, index)
             && (favnyr_core::places::is_network_path(path) || rfs::is_unc_path(path))
         {
             request_async_panel_listing(window, state, index, path, String::new(), false);
@@ -11712,7 +11773,9 @@ fn refresh_all_panels(window: &MainWindow, state: &AppState) {
     }
 
     let active = paths.get(active_idx).cloned().unwrap_or_default();
-    if searching.contains(&active_idx) {
+    // An active editor view needs no listing at all: see the note on the first
+    // loop. Its buffer was loaded when the view was created.
+    if is_editor_panel(state, active_idx) || searching.contains(&active_idx) {
         update_panels_ui(window, state);
         request_thumbnails(state);
         request_folder_stats(state);
@@ -11756,6 +11819,12 @@ fn relist_panel(state: &AppState, i: usize) {
         return;
     };
     if panel.search.is_some() {
+        return;
+    }
+    // Editor views render no rows: listing their folder would be pure I/O, and
+    // a successful listing would report the view as available again even when
+    // the file it edits is gone.
+    if panel.editor_file().is_some() {
         return;
     }
     panel.pending_initial = false; // fresher than the initial population
@@ -15052,7 +15121,15 @@ fn update_panels_ui(window: &MainWindow, state: &AppState) {
                 manual_order: folder_state.is_manual(&tab.current_path),
                 cursor_row: tab.cursor,
                 scroll_gen: tab.scroll_gen,
-                unavailable: p.unavailable, // folder unreachable → banner
+                // An editor view's banner is about its FILE, never about the
+                // folder the view happens to sit in: the listing that just
+                // finished says nothing about whether that file is still there,
+                // and would clear the banner by accident. Both reasons a file
+                // cannot be edited count — gone, and too large to load.
+                unavailable: match p.editor_file() {
+                    Some(file) => p.unavailable || !file.is_file(),
+                    None => p.unavailable, // folder unreachable → banner
+                },
                 ext_filter_on: tab.ext_filter_on && !folder_state.is_manual(&tab.current_path),
                 ext_filter: tab.ext_filter.as_str().into(),
                 search_recursive: p.search.is_some(),
@@ -18473,11 +18550,6 @@ fn build_panels(ws: WorkspaceState) -> (Vec<Panel>, LayoutNode, usize) {
     let layout = ws.layout_tree();
     let mut panels = Vec::with_capacity(ws.panels.len());
     for ps in &ws.panels {
-        // `editor_file` is persisted but deliberately not rebuilt here: a
-        // restored editor view comes back as a listing of its file's folder.
-        // Reopening the file automatically would resurrect a note that has
-        // since been deleted or renamed, and the folder is where the user can
-        // act on that.
         let mut tabs = Vec::with_capacity(ps.tabs.len());
         for ts in &ps.tabs {
             let path = resolve_restored_path(&ts.path);
@@ -18485,12 +18557,26 @@ fn build_panels(ws: WorkspaceState) -> (Vec<Panel>, LayoutNode, usize) {
         }
         // `tabs` guaranteed non-empty (sanitized removes empty panels).
         let active = ps.active_tab.min(tabs.len() - 1);
-        panels.push(Panel::from_book(
+        let mut panel = Panel::from_book(
             TabBook { tabs, active },
             ps.columns.clone(),
             ps.tab_bar_mode,
             ps.vbar_width,
-        ));
+        );
+        // A view that was editing a file comes back as an editor view. The
+        // tabs above already carry the file's FOLDER, which is what keeps every
+        // navigation helper meaningful if the file has since disappeared; the
+        // file itself is remembered separately so the buffer can be reloaded.
+        //
+        // Whether the file still exists is decided later, by
+        // `reload_editor_buffers`, which is the only place that can turn a
+        // missing file into the "not found" banner.
+        if let Some(file) = &ps.editor_file {
+            panel.editor = Some(EditorTarget {
+                file: PathBuf::from(file),
+            });
+        }
+        panels.push(panel);
     }
     let active_panel = ws.active_panel.min(panels.len() - 1);
     (panels, layout, active_panel)
