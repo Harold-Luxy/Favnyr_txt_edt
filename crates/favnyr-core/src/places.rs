@@ -481,8 +481,8 @@ fn network_extra() -> Vec<Place> {
 #[cfg(windows)]
 mod windrives {
     use super::{Place, PlaceKind};
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
+    use crate::win32::wide_text as wide;
+    use crate::win32::{CloseHandle, CreateFileW, DeviceIoControl};
     use std::path::PathBuf;
 
     #[link(name = "kernel32")]
@@ -512,27 +512,9 @@ mod windrives {
             lp_file_system_name_buffer: *mut u16,
             n_file_system_name_size: u32,
         ) -> i32;
-        // Querying a volume's bus (USB? → ejectable), see `bus_ejectable`.
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            sa: *mut core::ffi::c_void,
-            disp: u32,
-            flags: u32,
-            template: isize,
-        ) -> isize;
-        fn DeviceIoControl(
-            h: isize,
-            ctl: u32,
-            inbuf: *mut core::ffi::c_void,
-            insz: u32,
-            outbuf: *mut core::ffi::c_void,
-            outsz: u32,
-            ret: *mut u32,
-            ov: *mut core::ffi::c_void,
-        ) -> i32;
-        fn CloseHandle(h: isize) -> i32;
+        // The volume-bus probe that used to follow (`CreateFileW` →
+        // `DeviceIoControl` → `CloseHandle`) now lives in `crate::win32`,
+        // shared with the eject and process modules.
     }
     const INVALID_HANDLE: isize = -1;
     const FILE_SHARE_RW: u32 = 0x0000_0003;
@@ -751,13 +733,6 @@ mod windrives {
     const DRIVE_REMOTE: u32 = 4; // mapped network
     const DRIVE_CDROM: u32 = 5;
     const DRIVE_RAMDISK: u32 = 6;
-
-    fn wide(s: &str) -> Vec<u16> {
-        OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
 
     /// Bitmask of mounted letters (bit 0 = A: … 25 = Z:) — instantaneous.
     /// Used as a "signature" to detect a drive appearing/disappearing.

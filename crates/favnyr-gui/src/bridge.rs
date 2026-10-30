@@ -71,6 +71,7 @@ mod properties;
 mod recovery;
 mod search;
 mod shutdown;
+mod undo;
 
 use item_geometry::{GridLayout, ItemAnchor, ItemBand, ItemBands};
 
@@ -871,6 +872,12 @@ enum OpDelivery {
         original_path: PathBuf,
         error: Option<favnyr_core::fs::ops::TrashError>,
     },
+    /// Ctrl+Z finished: what it managed to take back, item by item.
+    UndoFinished {
+        op_id: i32,
+        done: Vec<undo::UndoEffect>,
+        failed: usize,
+    },
 }
 
 /// A long operation in flight, tracked in `OpRegistry` under a unique id.
@@ -1182,6 +1189,11 @@ pub struct AppState {
     /// Last item actually sent to a recoverable trash.
     /// History deliberately limited to one entry, session-only.
     last_trashed: Rc<RefCell<Option<PathBuf>>>,
+    /// Reversible operations, most recent last (Ctrl+Z). Session-only.
+    undo_history: Rc<RefCell<favnyr_core::undo::History>>,
+    /// What a running operation was asked to do, by `op_id`, until it ends and
+    /// can be turned into a history entry.
+    undo_plans: Rc<RefCell<std::collections::HashMap<i32, undo::UndoPlan>>>,
     /// Deliveries from the trash workers to the UI thread.
     op_deliveries: Arc<std::sync::Mutex<VecDeque<OpDelivery>>>,
     /// Long operations currently in flight. Empty at rest.
@@ -1429,6 +1441,8 @@ impl AppState {
             rename_source: Rc::new(RefCell::new(None)),
             delete_pending: Rc::new(RefCell::new(Vec::new())),
             last_trashed: Rc::new(RefCell::new(None)),
+            undo_history: Rc::new(RefCell::new(favnyr_core::undo::History::new())),
+            undo_plans: Rc::new(RefCell::new(std::collections::HashMap::new())),
             op_deliveries: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             ops: Rc::new(OpRegistry::default()),
             focus_after_refresh: Rc::new(RefCell::new(None)),
@@ -1522,6 +1536,8 @@ impl AppState {
             rename_source: Rc::new(RefCell::new(None)),
             delete_pending: Rc::new(RefCell::new(Vec::new())),
             last_trashed: Rc::new(RefCell::new(None)),
+            undo_history: Rc::new(RefCell::new(favnyr_core::undo::History::new())),
+            undo_plans: Rc::new(RefCell::new(std::collections::HashMap::new())),
             op_deliveries: Arc::new(std::sync::Mutex::new(VecDeque::new())),
             ops: Rc::new(OpRegistry::default()),
             focus_after_refresh: Rc::new(RefCell::new(None)),
@@ -1901,12 +1917,45 @@ pub fn install(window: &MainWindow, state: AppState) {
     refresh_mtime_offset(&state);
     // Windows shell context menu (shell extensions) — checked by default.
     window.set_shell_menu_enabled(cfg.shell_ctx_menu);
-    // Left panel: any positive state opens the unified Places +
-    // Favorites panel. This normalization also accepts the serialized value 2.
-    window.set_left_panel(if cfg.left_panel >= 1 { 1 } else { 0 });
+    // Left panel: always open at startup, on Places.
+    //
+    // The open/closed state is deliberately NOT restored. Collapsing the sidebar
+    // is a "give me more room, right now" gesture rather than a preference, and
+    // remembering it meant that one collapse sometime in the past left every
+    // later launch with no sidebar at all. The WIDTH is still remembered (see
+    // the close path): that is a real layout choice.
+    window.set_left_panel(1);
     window.set_sidebar_width(cfg.sidebar_width.max(140) as f32);
     push_sidebar_sections_ui(window, &state);
     refresh_sidebar(window, &state);
+    // The address tree is not part of `refresh_sidebar` (which also runs for
+    // capacity gauges, and has no business reading directories): it is pushed
+    // once here, then on every listing refresh.
+    push_path_tree(window, &state.current_path());
+    // Address tree: a single click navigates the active view, a double click
+    // opens the folder in a view beside it (zone 3 = split to the right).
+    {
+        let weak = window.as_weak();
+        window.on_path_node_navigate(move |path: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            if path.is_empty() {
+                return;
+            }
+            w.invoke_navigate_to(path);
+        });
+    }
+    {
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_path_node_open_in_new_view(move |path: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            if path.is_empty() {
+                return;
+            }
+            let panel = *st.active_panel.borrow() as i32;
+            open_directory_at_drop(&w, &st, PathBuf::from(path.as_str()), panel, -1, 3);
+        });
+    }
     // The Slint chevrons immediately update the live workspace state.
     // The title then re-reads the single dirty source; the Workspaces panel
     // already resynchronizes each time it opens via `ws-refresh`.
@@ -1920,6 +1969,7 @@ pub fn install(window: &MainWindow, state: AppState) {
                 Some(SidebarSection::Shortcuts) => &mut sections.shortcuts_collapsed,
                 Some(SidebarSection::Favorites) => &mut sections.favorites_collapsed,
                 Some(SidebarSection::Network) => &mut sections.network_collapsed,
+                Some(SidebarSection::Path) => &mut sections.path_collapsed,
                 _ => return,
             };
             if *target != collapsed {
@@ -5047,6 +5097,9 @@ pub fn install(window: &MainWindow, state: AppState) {
             let Some(handle) = st.ops.finish(op_id) else {
                 return; // unknown id: already released
             };
+            // The operation is over, so what it produced is now knowable: turn
+            // its plan into a Ctrl+Z entry before anything refreshes.
+            undo::record_finished(&st, op_id);
             let Some(w) = weak.upgrade() else { return };
             sync_op_busy(&w, &st);
             let completed_targets = std::mem::take(
@@ -5564,6 +5617,7 @@ pub fn install(window: &MainWindow, state: AppState) {
             if let Some(to) = renamed_to.as_ref() {
                 invalidate_thumbnail_paths(&st, &[from.clone(), to.clone()]);
                 track_renamed_path(&w, &st, &from, to);
+                undo::remember_rename(&st, &from, to);
             }
             // Refresh EVERY panel, not just the active one, so other views on the
             // same folder show the rename immediately — harmonized with
@@ -5688,6 +5742,7 @@ pub fn install(window: &MainWindow, state: AppState) {
                     match ops::create_entry(&cur, &name, kind == 0) {
                         Ok(p) => {
                             info!(path = %p.display(), kind, "created entry");
+                            undo::remember_created(&st, &p);
                             p.file_name().map(|n| n.to_string_lossy().into_owned())
                         }
                         Err(err) => {
@@ -5860,6 +5915,36 @@ pub fn install(window: &MainWindow, state: AppState) {
                         trashed.push(path.clone());
                         *st.last_trashed.borrow_mut() = Some(path);
                     }
+                    // Ctrl+Z reuses the bookkeeping below by describing itself
+                    // in the same terms a real operation does: an item that went
+                    // back is "moved" the other way, one that was removed is
+                    // "gone", and one that left the recycle bin is "added back".
+                    OpDelivery::UndoFinished {
+                        op_id,
+                        done,
+                        failed,
+                    } => {
+                        if let Some(handle) = st.ops.finish(op_id) {
+                            invalidate_thumbnail_paths(&st, &handle.thumbnail_invalidations);
+                        }
+                        sync_op_busy(&w, &st);
+                        let reverted = done.len();
+                        for effect in done {
+                            match effect {
+                                undo::UndoEffect::MovedBack { from, to } => moved.push((to, from)),
+                                undo::UndoEffect::RemovedCreated(path) => gone.push(path),
+                                undo::UndoEffect::Restored(path) => {
+                                    trashed.retain(|trashed| trashed != &path);
+                                    manual_added.push(path);
+                                }
+                            }
+                        }
+                        let lang = st.snapshot_config().language;
+                        if let Some(message) = undo::undo_message(lang, reverted, failed) {
+                            notice(&w, message, NoticeKind::Success);
+                        }
+                        refresh_after_restore = refresh_after_restore || reverted > 0;
+                    }
                     OpDelivery::RestoreFinished {
                         op_id,
                         original_path,
@@ -5966,6 +6051,19 @@ pub fn install(window: &MainWindow, state: AppState) {
             start_heavy_op(&w, &st, Heavy::Trash(paths), lang, None, None, None);
         });
     }
+    // Ctrl+Z (customizable) takes back the most recent reversible operation:
+    // a rename, a move, a copy, a file created, or a deletion to the recycle
+    // bin. See `undo` for what is recorded and what is deliberately not.
+    {
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_action_undo(move || {
+            let Some(w) = weak.upgrade() else { return };
+            undo::undo_last(&w, &st);
+        });
+    }
+    // The dedicated "restore the last deleted item" action still exists (its
+    // default moved aside for Ctrl+Z), and still restores only the trash.
     // Ctrl+Z (customizable) restores only the last deleted item,
     // and only if the active view still shows its original folder.
     {
@@ -9090,12 +9188,117 @@ fn refresh_sidebar(window: &MainWindow, state: &AppState) {
 /// Pushes the workspace-specific collapse state and the global config order to Slint.
 /// Called at startup, when loading a workspace, and on reset; no
 /// parallel visual logic decides default values.
+/// Builds the address tree of the active view.
+///
+/// Four kinds of rows, in this order: the ancestry (drive root down to the
+/// parent), the folder itself, its sub-folders, then its siblings. Only folders
+/// ever appear — the tree is for navigating, and a file cannot be navigated
+/// into.
+///
+/// Sub-folders and siblings are read from disk (one listing each). Everything
+/// else comes from parsing the path, so a deep path costs two directory reads
+/// no matter how many levels it has.
+fn build_path_tree(current: &Path) -> Vec<crate::PathNode> {
+    let mut nodes: Vec<crate::PathNode> = Vec::new();
+
+    // 1. Ancestry, from the root down to and including the folder itself.
+    // `parent()` walks up to the root on its own, which also covers UNC paths
+    // (`\\server\share\a` → `\\server\share` → `\\server`).
+    let mut chain: Vec<&Path> = Vec::new();
+    let mut cursor = Some(current);
+    while let Some(path) = cursor {
+        chain.push(path);
+        cursor = path.parent();
+    }
+    let total = chain.len();
+    for (index, path) in chain.iter().rev().enumerate() {
+        let is_current = index + 1 == total;
+        // The ancestry sits ON the thread (roles 0 and 1); the current folder
+        // ends it with a dot.
+        nodes.push(path_tree_node(path, 0, if is_current { 1 } else { 0 }, true));
+    }
+
+    // A network folder is never listed from here. `list_dir` on SMB or a mapped
+    // drive blocks for seconds, and this runs on the UI thread as part of
+    // refreshing the sidebar: the ancestry above costs nothing (it is parsed
+    // from the path), so a share still gets a usable tree — just without its
+    // sub-folders and siblings.
+    if favnyr_core::places::is_network_path(current) || rfs::is_unc_path(current) {
+        return nodes;
+    }
+
+    // 2. Sub-folders of the current folder.
+    for path in child_folders(current) {
+        nodes.push(path_tree_node(&path, 1, 2, true));
+    }
+
+    // 3. Siblings: the other folders of the parent.
+    if let Some(parent) = current.parent() {
+        for path in child_folders(parent) {
+            if path == current {
+                continue;
+            }
+            nodes.push(path_tree_node(&path, 0, 3, true));
+        }
+    }
+
+    nodes
+}
+
+/// Visible sub-folders of `dir`, sorted by name.
+///
+/// Hidden folders are always skipped, whatever the view's own setting says: the
+/// tree is a map of where a session navigates, and dot-files would bury it.
+/// A folder that cannot be listed simply contributes nothing.
+fn child_folders(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = rfs::list_dir(dir, false) else {
+        return Vec::new();
+    };
+    let mut folders: Vec<PathBuf> = entries
+        .into_iter()
+        .filter(|entry| entry.is_dir)
+        .map(|entry| entry.path)
+        .collect();
+    folders.sort_by_key(|path| path_label(path).to_lowercase());
+    folders
+}
+
+/// Display name of one tree row: the folder's own name, or its full path when
+/// it has none (a drive root such as `C:\`).
+fn path_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn path_tree_node(path: &Path, depth: i32, role: i32, available: bool) -> crate::PathNode {
+    crate::PathNode {
+        label: path_label(path).into(),
+        path: path.display().to_string().into(),
+        depth,
+        role,
+        available,
+    }
+}
+
+/// Pushes the address tree for `path` to the sidebar.
+///
+/// The path is passed in rather than read from the active tab on purpose:
+/// `tab.current_path` is only updated once the listing ARRIVES, so a tree built
+/// from it right after a navigation would still describe the folder being left.
+/// Every caller of `refresh_listing` already knows the folder it is about to
+/// show — that is the one the tree must describe.
+fn push_path_tree(window: &MainWindow, path: &Path) {
+    window.set_sidebar_path_nodes(ModelRc::new(VecModel::from(build_path_tree(path))));
+}
+
 fn push_sidebar_sections_ui(window: &MainWindow, state: &AppState) {
     let sections = state.sidebar_sections.get();
     window.set_sidebar_shortcuts_collapsed(sections.shortcuts_collapsed);
     window.set_fav_section_collapsed(sections.favorites_collapsed);
     window.set_sidebar_drives_collapsed(sections.drives_collapsed);
     window.set_sidebar_network_collapsed(sections.network_collapsed);
+    window.set_sidebar_path_collapsed(sections.path_collapsed);
     window.set_sidebar_section_order(ModelRc::new(VecModel::from(
         state
             .snapshot_config()
@@ -12638,8 +12841,10 @@ fn clear_external_file_hover(window: &MainWindow) {
 }
 
 /// Finishes an OLE drop received by Favnyr. The final target is re-read after
-/// replaying the authoritative point: executables use ShellExecute, Ctrl copies,
-/// Shift moves, and other drops use the Move/Copy/Link menu shared between views.
+/// replaying the authoritative point: executables use ShellExecute, and the
+/// transfer intent comes from `DropAction` — a plain drag moves, Ctrl copies,
+/// and only Ctrl+Shift still opens the Move/Copy/Link menu shared with the
+/// in-app drags.
 #[cfg(windows)]
 fn on_external_file_drop(
     window: &MainWindow,
@@ -13689,6 +13894,26 @@ fn start_heavy_op(
         completed_targets: completed_targets.clone(),
     });
 
+    // Remember what this operation was ASKED to do. `on_op_finished` compares
+    // that against the disk to build the undo entry, so a cancelled or
+    // half-failed run records only what really happened.
+    let plan = match &work {
+        Heavy::Copy(items) => Some(undo::UndoPlan::Copy(
+            items.iter().map(|(_, dst, _)| dst.clone()).collect(),
+        )),
+        Heavy::Move(items) => Some(undo::UndoPlan::Move(
+            items
+                .iter()
+                .map(|(src, dst, _)| (src.clone(), dst.clone()))
+                .collect(),
+        )),
+        Heavy::Trash(paths) => Some(undo::UndoPlan::Trash(paths.clone())),
+        // Nothing brings a permanent delete back, so it is never offered.
+        Heavy::PermanentDelete(_) => None,
+        #[cfg(windows)]
+        Heavy::NativeMoveCleanup(_) => None,
+    };
+    undo::remember_plan(state, op_id, plan);
     let running = match work {
         Heavy::Copy(_) => i18n::tr(lang, "op_copying"),
         Heavy::Move(_) => i18n::tr(lang, "op_moving"),
@@ -14193,6 +14418,11 @@ fn listing_denied(r: &Result<(Vec<Entry>, usize), favnyr_core::Error>) -> bool {
 /// proven synchronous path, limiting the behavior change to the only
 /// I/O likely to block for a long time (SMB, mapped drive, UNC).
 fn refresh_listing(window: &MainWindow, state: &AppState, path: &Path) {
+    // The address tree describes the folder about to be shown. `path` is used
+    // rather than the tab's stored path: that one only catches up once the
+    // listing arrives, so the tree would otherwise keep describing the folder
+    // being left.
+    push_path_tree(window, path);
     if search::refresh(window, state, path) {
         return;
     }
@@ -18002,24 +18232,24 @@ fn open_editor_view(window: &MainWindow, state: &AppState, file: PathBuf) {
         let target = state.panels.borrow()[idx]
             .editor_file()
             .map(Path::to_path_buf);
-        if let Some(target) = target {
-            if let Err(err) = load_editor_buffer(state, idx, &target) {
-                warn!(error = %err, file = %target.display(), "loading the editor buffer failed");
-                let lang = state.snapshot_config().language;
-                let key = if std::fs::metadata(&target).map(|m| m.len() > MAX_EDITOR_BYTES).unwrap_or(false)
-                {
-                    "editor_too_large"
-                } else {
-                    "editor_missing_file"
-                };
-                notice(window, i18n::tr(lang, key), NoticeKind::Error);
-                // The view exists but has nothing to edit: drop it rather than
-                // leave an empty editor with no way back to the file.
-                if take_view(state, idx).is_some() {
-                    switch_active_panel(window, state);
-                }
-                return;
+        if let Some(target) = target
+            && let Err(err) = load_editor_buffer(state, idx, &target)
+        {
+            warn!(error = %err, file = %target.display(), "loading the editor buffer failed");
+            let lang = state.snapshot_config().language;
+            let key = if std::fs::metadata(&target).map(|m| m.len() > MAX_EDITOR_BYTES).unwrap_or(false)
+            {
+                "editor_too_large"
+            } else {
+                "editor_missing_file"
+            };
+            notice(window, i18n::tr(lang, key), NoticeKind::Error);
+            // The view exists but has nothing to edit: drop it rather than
+            // leave an empty editor with no way back to the file.
+            if take_view(state, idx).is_some() {
+                switch_active_panel(window, state);
             }
+            return;
         }
         switch_active_panel(window, state);
         update_panels_ui(window, state);
@@ -19022,24 +19252,20 @@ pub fn persist_window_size(window: &MainWindow, state: &AppState) {
         );
     }
 
-    // Left panel: open state + width.
-    let left_panel = window.get_left_panel();
+    // Left panel: width only. The open state is intentionally not saved — see
+    // the matching note in `install`, where startup always opens it.
     let sidebar_width = window.get_sidebar_width().round().max(0.0) as u32;
 
     let cfg = state.snapshot_config();
     let dimensions_changed = logical_size
         .map(|(w, h)| cfg.window_width != w || cfg.window_height != h)
         .unwrap_or(false);
-    if dimensions_changed
-        || cfg.left_panel != left_panel
-        || (sidebar_width > 0 && cfg.sidebar_width != sidebar_width)
-    {
+    if dimensions_changed || (sidebar_width > 0 && cfg.sidebar_width != sidebar_width) {
         state.persist_config(|c| {
             if let Some((w, h)) = logical_size {
                 c.window_width = w;
                 c.window_height = h;
             }
-            c.left_panel = left_panel;
             if sidebar_width > 0 {
                 c.sidebar_width = sidebar_width;
             }
@@ -22120,7 +22346,10 @@ mod tests {
         assert!(workspaces_differ(&a, &b));
 
         b.sidebar_sections.favorites_collapsed = false;
-        b.sidebar_sections.network_collapsed = true;
+        // `path_collapsed` defaults to false, so flipping it is a real change.
+        // (`network_collapsed` now also defaults to true, so setting it here
+        // would leave the two states identical.)
+        b.sidebar_sections.path_collapsed = true;
         assert!(workspaces_differ(&a, &b));
     }
 
@@ -22132,13 +22361,15 @@ mod tests {
             favorites_collapsed: true,
             drives_collapsed: false,
             network_collapsed: true,
+            path_collapsed: false,
         };
         let config = Config {
-            sidebar_section_order: [
+            sidebar_section_order: vec![
                 SidebarSection::Favorites,
                 SidebarSection::Network,
                 SidebarSection::Drives,
                 SidebarSection::Shortcuts,
+                SidebarSection::Path,
             ],
             ..Config::default()
         };

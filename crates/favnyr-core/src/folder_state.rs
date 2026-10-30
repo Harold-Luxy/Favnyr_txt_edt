@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Error;
+use crate::fs::ops::paths_equal;
 use crate::{Result, paths};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,28 +33,19 @@ pub struct FolderStateStore {
     folders: BTreeMap<String, FolderPresentation>,
 }
 
+impl crate::store::TomlStore for FolderStateStore {
+    const LABEL: &'static str = "unreadable folder state store";
+
+    fn after_load(&mut self) {
+        self.refold_keys();
+    }
+}
+
 impl FolderStateStore {
     /// Loads a store without ever making startup fail. A malformed file is
     /// preserved before an empty store is returned.
     pub fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str::<Self>(&content) {
-                Ok(mut store) => {
-                    store.refold_keys();
-                    store
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        path = %path.display(),
-                        "unreadable folder state store"
-                    );
-                    paths::preserve_unreadable(path);
-                    Self::default()
-                }
-            },
-            Err(_) => Self::default(),
-        }
+        crate::store::load(path)
     }
 
     /// Saves atomically. When no directory uses folder-local state, the file
@@ -67,10 +59,9 @@ impl FolderStateStore {
             }
             return Ok(());
         }
-        let text = toml::to_string_pretty(self)
-            .map_err(|err| Error::Workspace(format!("folder state serialization: {err}")))?;
-        paths::write_atomic(path, &text)?;
-        Ok(())
+        crate::store::save(path, self, |err| {
+            Error::Workspace(format!("folder state serialization: {err}"))
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -292,17 +283,6 @@ fn replace_name(order: &mut Vec<String>, from: &str, to: &str) -> bool {
         }
     });
     *order != previous
-}
-
-#[cfg(windows)]
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    left.to_string_lossy()
-        .eq_ignore_ascii_case(&right.to_string_lossy())
-}
-
-#[cfg(not(windows))]
-fn paths_equal(left: &Path, right: &Path) -> bool {
-    left == right
 }
 
 #[cfg(test)]

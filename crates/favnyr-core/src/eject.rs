@@ -186,14 +186,9 @@ mod imp {
 #[cfg(windows)]
 mod imp {
     use super::EjectError;
-    use std::os::windows::ffi::OsStrExt;
-
-    fn wide(s: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(s)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
+    // The shared NUL-terminated UTF-16 helper, aliased to the name this module
+    // has always called it by.
+    use crate::win32::wide_text as wide;
 
     /// Extracts the letter from a device (`"Z:"`, `"Z:\\"`, `"z"` → `'Z'`).
     fn drive_letter(device: &str) -> Option<char> {
@@ -251,30 +246,7 @@ mod imp {
     const CR_SUCCESS: u32 = 0;
     const CONNECT_UPDATE_PROFILE: u32 = 1;
 
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            sa: *mut core::ffi::c_void,
-            disp: u32,
-            flags: u32,
-            template: isize,
-        ) -> isize;
-        fn DeviceIoControl(
-            h: isize,
-            ctl: u32,
-            inbuf: *mut core::ffi::c_void,
-            insz: u32,
-            outbuf: *mut core::ffi::c_void,
-            outsz: u32,
-            ret: *mut u32,
-            ov: *mut core::ffi::c_void,
-        ) -> i32;
-        fn CloseHandle(h: isize) -> i32;
-        fn GetLastError() -> u32;
-    }
+    use crate::win32::{CloseHandle, CreateFileW, DeviceIoControl, GetLastError};
 
     // Event log (wevtapi.dll, a system DLL → zero dependency). When a removal
     // request is refused because of open handles, the KERNEL logs Kernel-PnP

@@ -23,7 +23,11 @@ pub mod places;
 pub mod process_lock;
 pub mod properties;
 pub mod shortcuts;
+pub(crate) mod store;
 pub mod thumbnail;
+pub mod undo;
+#[cfg(windows)]
+pub mod win32;
 pub mod workspace;
 
 pub use columns::ColumnSpec;

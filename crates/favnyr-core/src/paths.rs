@@ -183,10 +183,25 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 /// but the next save would then write that emptiness over the user's only
 /// copy. Setting the file aside first turns a silent, permanent loss into
 /// something recoverable by hand, and leaves a line in the log saying so.
+///
+/// The kept name is suffixed (`store.toml.corrupt`, then `.corrupt-2`, …).
+/// `rename` REPLACES an existing target on every platform, so a fixed name
+/// would let a SECOND corruption silently destroy the first backup — the one
+/// copy the user may still need.
 pub fn preserve_unreadable(path: &Path) {
-    let mut name = std::ffi::OsString::from(path.file_name().unwrap_or_default());
-    name.push(".corrupt");
-    let kept = path.with_file_name(name);
+    if !path.exists() {
+        // Nothing to preserve. Reporting "could not be kept aside" here
+        // described a failure that never happened and sent readers looking
+        // for a permissions problem.
+        return;
+    }
+    let Some(kept) = free_corrupt_sibling(path) else {
+        tracing::warn!(
+            path = %path.display(),
+            "unreadable file could not be kept aside: no free .corrupt name"
+        );
+        return;
+    };
     match std::fs::rename(path, &kept) {
         Ok(()) => tracing::warn!(
             path = %path.display(),
@@ -199,6 +214,26 @@ pub fn preserve_unreadable(path: &Path) {
             "unreadable file could not be kept aside"
         ),
     }
+}
+
+/// First `<name>.corrupt[-N]` sibling that does not exist yet, so an earlier
+/// backup is never overwritten.
+fn free_corrupt_sibling(path: &Path) -> Option<PathBuf> {
+    let base = path.file_name()?;
+    let candidate = |suffix: &str| {
+        let mut name = base.to_os_string();
+        name.push(suffix);
+        path.with_file_name(name)
+    };
+    let first = candidate(".corrupt");
+    if !first.exists() {
+        return Some(first);
+    }
+    // Bounded: a directory holding thousands of prior corruptions is not worth
+    // scanning further, and giving up is safer than choosing a name at random.
+    (2..=1000)
+        .map(|serial| candidate(&format!(".corrupt-{serial}")))
+        .find(|kept| !kept.exists())
 }
 
 #[cfg(test)]
@@ -329,6 +364,46 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    /// A fixed `.corrupt` name would let a second corruption overwrite the
+    /// first backup, which is the copy the user most likely still needs.
+    #[test]
+    fn a_second_corruption_never_overwrites_the_first_backup() {
+        let dir = scratch("preserve-twice");
+        let file = dir.join("favorites.toml");
+
+        std::fs::write(&file, "first corruption").unwrap();
+        preserve_unreadable(&file);
+        std::fs::write(&file, "second corruption").unwrap();
+        preserve_unreadable(&file);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("favorites.toml.corrupt")).unwrap(),
+            "first corruption",
+            "the first backup is untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("favorites.toml.corrupt-2")).unwrap(),
+            "second corruption",
+            "the second one is kept beside it"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A file that is already gone has nothing to preserve, and must not log a
+    /// failure that never happened.
+    #[test]
+    fn a_missing_file_is_left_alone() {
+        let dir = scratch("preserve-missing");
+        let file = dir.join("absent.toml");
+
+        preserve_unreadable(&file);
+
+        assert!(!file.exists());
+        assert!(!dir.join("absent.toml.corrupt").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
 
     #[test]

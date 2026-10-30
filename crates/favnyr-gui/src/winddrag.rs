@@ -14,7 +14,6 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::io::Write;
-use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::AsRawHandle;
@@ -153,9 +152,11 @@ impl FavnyrDropTarget {
         if kind.copy_only() || action == DropAction::Copy {
             return Self::choose_copy_effect(allowed, true);
         }
-        if action == DropAction::Move && allowed.0 & DROPEFFECT_MOVE.0 == 0 {
-            return DROPEFFECT_NONE;
-        }
+        // Move intent — every plain drag now — keeps MOVE while the source
+        // allows it. A source that only advertises COPY is DOWNGRADED to a
+        // copy rather than refused: it can never have its files deleted by
+        // this gesture anyway (the handoff is COPY, Favnyr moves by itself
+        // afterwards), so refusing the drop would only lose the transfer.
         if allowed.0 & DROPEFFECT_MOVE.0 != 0 {
             DROPEFFECT_MOVE
         } else {
@@ -984,17 +985,10 @@ fn write_hglobal(hglobal: HGLOBAL, path: &Path) -> Result<(), String> {
     result
 }
 
-/// NUL-terminated wide string (kept alive by the caller for as long as the
-/// pointer is in use).
-fn wide(p: &Path) -> Vec<u16> {
-    p.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
-}
-fn wide_str(s: &std::ffi::OsStr) -> Vec<u16> {
-    s.encode_wide().chain(std::iter::once(0)).collect()
-}
+/// NUL-terminated wide strings (kept alive by the caller for as long as the
+/// pointer is in use) — the shared core helpers under this module's names.
+use favnyr_core::win32::wide_os as wide_str;
+use favnyr_core::win32::wide_path as wide;
 
 // Keep links available for Shell targets such as taskbar pins.
 const OUTGOING_EFFECTS: DROPEFFECT =
@@ -1377,7 +1371,9 @@ mod tests {
                 IncomingDataKind::ShellPaths,
                 DropAction::Move
             ),
-            DROPEFFECT_NONE
+            // A COPY-only source is downgraded, not rejected: it can never be
+            // made to lose files here, so the transfer is kept as a copy.
+            DROPEFFECT_COPY
         );
     }
 

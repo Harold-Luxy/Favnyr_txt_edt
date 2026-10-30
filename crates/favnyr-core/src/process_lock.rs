@@ -43,7 +43,6 @@ pub(crate) use imp::process_executable_name;
 #[cfg(windows)]
 mod imp {
     use std::collections::VecDeque;
-    use std::os::windows::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
 
     use super::PathLock;
@@ -115,19 +114,10 @@ mod imp {
         }
     }
 
+    use crate::win32::{CloseHandle, CreateFileW, GetLastError};
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            security_attributes: *mut core::ffi::c_void,
-            creation_disposition: u32,
-            flags: u32,
-            template: isize,
-        ) -> isize;
-        fn CloseHandle(handle: isize) -> i32;
-        fn GetLastError() -> u32;
         fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> isize;
         fn QueryFullProcessImageNameW(
             process: isize,
@@ -180,13 +170,10 @@ mod imp {
         }
     }
 
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    }
+    /// NUL-terminated UTF-16 for a path (shared helper, local name kept).
+    use crate::win32::wide_path as wide;
 
+    /// Decodes a NUL-terminated UTF-16 buffer back into trimmed text.
     fn wide_text(value: &[u16]) -> String {
         let end = value
             .iter()

@@ -684,7 +684,6 @@ fn copy_file_progress(
     on_bytes: &mut dyn FnMut(u64),
     cancel: &dyn Fn() -> bool,
 ) -> Result<OpStatus> {
-    use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn CopyFileExW(
@@ -744,12 +743,7 @@ fn copy_file_progress(
         }
     }
 
-    let wide = |p: &Path| -> Vec<u16> {
-        p.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
+    let wide = crate::win32::wide_path;
     let src_w = wide(src);
     let dst_w = wide(dst);
     let mut ctx = Ctx {
@@ -848,7 +842,6 @@ pub fn link_as(src: &Path, dst_path: &Path) -> Result<()> {
 /// we retry without it there (an admin token is then required).
 #[cfg(windows)]
 fn create_symlink_win(link: &Path, target: &Path, is_dir: bool) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -859,12 +852,7 @@ fn create_symlink_win(link: &Path, target: &Path, is_dir: bool) -> std::io::Resu
     const ERROR_INVALID_PARAMETER: i32 = 87;
 
     // Null-terminated UTF-16, byte-exact for non-ASCII paths.
-    let to_wide = |p: &Path| -> Vec<u16> {
-        p.as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
-    };
+    let to_wide = crate::win32::wide_path;
     let link_w = to_wide(link);
     let target_w = to_wide(target);
     let base = if is_dir { FLAG_DIRECTORY } else { 0 };

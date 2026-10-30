@@ -82,43 +82,26 @@ pub struct AnnotationStore {
     entries: BTreeMap<String, Annotation>,
 }
 
+impl crate::store::TomlStore for AnnotationStore {
+    const LABEL: &'static str = "unreadable store";
+
+    fn after_load(&mut self) {
+        self.refold_keys();
+    }
+}
+
 impl AnnotationStore {
     /// Loads from `path`; an empty store if the file is missing, unreadable or
     /// corrupted — an annotation must never prevent the app from starting.
     pub fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str::<Self>(&content) {
-                Ok(mut store) => {
-                    store.refold_keys();
-                    store
-                }
-                Err(err) => {
-                    // The file is there but cannot be read back. Starting from
-                    // an empty store keeps the application usable; letting the
-                    // next save write that emptiness over the user's only copy
-                    // does not, so the file is kept aside first.
-                    tracing::warn!(
-                        error = %err,
-                        path = %path.display(),
-                        "unreadable store"
-                    );
-                    crate::paths::preserve_unreadable(path);
-                    Self::default()
-                }
-            },
-            Err(_) => Self::default(),
-        }
+        crate::store::load(path)
     }
 
     /// Writes the store as TOML (creating the parent folder if needed).
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let text = toml::to_string_pretty(self)
-            .map_err(|err| Error::Workspace(format!("annotations serialization: {err}")))?;
-        crate::paths::write_atomic(path, &text)?;
-        Ok(())
+        crate::store::save(path, self, |err| {
+            Error::Workspace(format!("annotations serialization: {err}"))
+        })
     }
 
     /// Brings every key under the current folding rule.

@@ -228,6 +228,15 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: "restore-trash",
         group: ActionGroup::FileOps,
+        // No default any more: `undo` owns Ctrl+Z and covers the trash as one
+        // of its cases. Keeping the id means a dedicated "restore the last
+        // deleted item" key is still one rebind away, and any saved override
+        // for it keeps working.
+        default: "",
+    },
+    ActionDef {
+        id: "undo",
+        group: ActionGroup::FileOps,
         default: "Ctrl+Z",
     },
     ActionDef {
@@ -803,7 +812,7 @@ mod tests {
         }
         assert_eq!(
             km.action_for(&Chord::parse("Ctrl+Z").unwrap()),
-            Some("restore-trash")
+            Some("undo")
         );
     }
 
@@ -895,12 +904,17 @@ mod tests {
     }
 
     #[test]
-    fn restore_trash_has_standard_default() {
+    fn undo_owns_ctrl_z_and_restoring_from_the_trash_has_no_default() {
         let km = Keymap::build(&BTreeMap::new());
-        assert_eq!(km.chord_of("restore-trash"), "Ctrl+Z");
+        assert_eq!(km.chord_of("undo"), "Ctrl+Z");
         assert_eq!(
             km.action_for(&Chord::parse("Ctrl+Z").unwrap()),
-            Some("restore-trash")
+            Some("undo")
+        );
+        assert_eq!(
+            km.chord_of("restore-trash"),
+            "",
+            "the dedicated restore key moved aside for the general undo"
         );
     }
 

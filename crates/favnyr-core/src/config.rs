@@ -66,14 +66,19 @@ pub enum SidebarSection {
     Shortcuts = 1,
     Favorites = 2,
     Network = 3,
+    /// The address tree of the active view. Added last, hence the highest
+    /// discriminant: the codes are shared with the Slint UI, so existing values
+    /// must never move.
+    Path = 4,
 }
 
 impl SidebarSection {
-    pub const COUNT: usize = 4;
+    pub const COUNT: usize = 5;
     pub const DEFAULT_ORDER: [Self; Self::COUNT] = [
+        Self::Path,
+        Self::Favorites,
         Self::Drives,
         Self::Shortcuts,
-        Self::Favorites,
         Self::Network,
     ];
 
@@ -87,32 +92,52 @@ impl SidebarSection {
             1 => Some(Self::Shortcuts),
             2 => Some(Self::Favorites),
             3 => Some(Self::Network),
+            4 => Some(Self::Path),
             _ => None,
         }
     }
 
-    /// Repairs an order containing duplicates (manually edited config) by
-    /// keeping the first sections then appending the missing ones.
-    /// The fixed-size array avoids any allocation.
-    pub fn sanitized_order(order: [Self; Self::COUNT]) -> [Self; Self::COUNT] {
-        let mut normalized = Self::DEFAULT_ORDER;
-        let mut len = 0usize;
-        for section in order.into_iter().chain(Self::DEFAULT_ORDER) {
-            if !normalized[..len].contains(&section) {
-                normalized[len] = section;
-                len += 1;
-                if len == Self::COUNT {
-                    break;
-                }
+    /// Repairs an order that is short, empty or full of duplicates (a config
+    /// written by an older build, or edited by hand).
+    ///
+    /// The list became a `Vec` when `Path` was added: the field used to be a
+    /// fixed-size array of four, so an older `config.toml` simply has four
+    /// entries and would fail to deserialize into anything longer.
+    pub fn sanitized_order(order: &[Self]) -> Vec<Self> {
+        // Whether the saved config already knew about `Path` decides what
+        // happens below: a missing entry is a migration, a present one is the
+        // user's own placement and must be kept exactly as it is.
+        let knew_path = order.contains(&Self::Path);
+
+        let mut normalized: Vec<Self> = Vec::with_capacity(Self::COUNT);
+        for section in order {
+            if !normalized.contains(section) {
+                normalized.push(*section);
             }
+        }
+        // Fill in whatever is missing, in the default order.
+        for section in Self::DEFAULT_ORDER {
+            if !normalized.contains(&section) {
+                normalized.push(section);
+            }
+        }
+        normalized.truncate(Self::COUNT);
+
+        // A config predating `Path` just had it appended at the bottom. Put it
+        // at the top instead, which is where it belongs.
+        if !knew_path
+            && let Some(from) = normalized.iter().position(|s| *s == Self::Path)
+        {
+            normalized.remove(from);
+            normalized.insert(0, Self::Path);
         }
         normalized
     }
 
     /// Moves `section` to its final index in the global order.
     /// Returns `true` only if the order actually changed.
-    pub fn reorder(order: &mut [Self; Self::COUNT], section: Self, target_index: usize) -> bool {
-        *order = Self::sanitized_order(*order);
+    pub fn reorder(order: &mut Vec<Self>, section: Self, target_index: usize) -> bool {
+        *order = Self::sanitized_order(order);
         let Some(source_index) = order.iter().position(|item| *item == section) else {
             return false;
         };
@@ -120,26 +145,18 @@ impl SidebarSection {
         if source_index == target_index {
             return false;
         }
-        if source_index < target_index {
-            for index in source_index..target_index {
-                order[index] = order[index + 1];
-            }
-        } else {
-            for index in (target_index + 1..=source_index).rev() {
-                order[index] = order[index - 1];
-            }
-        }
-        order[target_index] = section;
+        let moved = order.remove(source_index);
+        order.insert(target_index, moved);
         true
     }
 }
 
-fn default_sidebar_section_order() -> [SidebarSection; SidebarSection::COUNT] {
-    SidebarSection::DEFAULT_ORDER
+fn default_sidebar_section_order() -> Vec<SidebarSection> {
+    SidebarSection::DEFAULT_ORDER.to_vec()
 }
 
-fn sidebar_section_order_is_default(order: &[SidebarSection; SidebarSection::COUNT]) -> bool {
-    *order == SidebarSection::DEFAULT_ORDER
+fn sidebar_section_order_is_default(order: &[SidebarSection]) -> bool {
+    order == SidebarSection::DEFAULT_ORDER
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,11 +168,13 @@ pub struct Config {
     pub window_height: u32,
     /// Asks for confirmation before permanent deletion (bypassing the trash).
     pub confirm_permanent_delete: bool,
-    /// Panel open in the left column: 0 = collapsed, 1 = Places,
-    /// 2 = Favorites.
-    #[serde(default = "default_left_panel")]
-    pub left_panel: i32,
     /// Logical width (px) of the sidebar.
+    ///
+    /// There is deliberately no field for the sidebar's OPEN state: it always
+    /// starts open. Collapsing it is a momentary gesture rather than a
+    /// preference, so remembering it would mean one collapse disables the
+    /// sidebar for every later launch. A `left_panel` key in an older config file
+    /// is simply ignored (the struct tolerates unknown keys).
     pub sidebar_width: u32,
     /// Global order of the sidebar sections. Unlike their collapsed
     /// state, this order follows the user when they switch workspace.
@@ -163,7 +182,7 @@ pub struct Config {
         default = "default_sidebar_section_order",
         skip_serializing_if = "sidebar_section_order_is_default"
     )]
-    pub sidebar_section_order: [SidebarSection; SidebarSection::COUNT],
+    pub sidebar_section_order: Vec<SidebarSection>,
     /// Favnyr-side redirects for standard sidebar shortcuts renamed from
     /// inside the application. Keys remain the OS-provided original paths, so
     /// a later OS-side location change naturally supersedes stale entries.
@@ -317,11 +336,6 @@ fn default_true() -> bool {
 /// Default logical width of the sidebar (px).
 pub const DEFAULT_SIDEBAR_WIDTH: u32 = 210;
 
-/// Default left panel: Places (1).
-fn default_left_panel() -> i32 {
-    1
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -330,9 +344,8 @@ impl Default for Config {
             window_width: DEFAULT_WINDOW_WIDTH,
             window_height: DEFAULT_WINDOW_HEIGHT,
             confirm_permanent_delete: true,
-            left_panel: default_left_panel(),
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
-            sidebar_section_order: SidebarSection::DEFAULT_ORDER,
+            sidebar_section_order: SidebarSection::DEFAULT_ORDER.to_vec(),
             sidebar_shortcut_redirects: std::collections::BTreeMap::new(),
             default_columns: crate::columns::default_columns(),
             shortcut_overrides: std::collections::BTreeMap::new(),
@@ -395,14 +408,9 @@ impl Config {
 
     /// Serializes to TOML and writes to disk (creates parent folders).
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let text = toml::to_string_pretty(self).map_err(|e| {
+        crate::store::save(path, self, |e| {
             crate::error::Error::Config(format!("serialize {}: {e}", path.display()))
-        })?;
-        crate::paths::write_atomic(path, &text)?;
-        Ok(())
+        })
     }
 
     /// Normalizes only the preferences a manually edited TOML could break
@@ -413,7 +421,7 @@ impl Config {
         self.default_thumbnail_zoom = self
             .default_thumbnail_zoom
             .clamp(MIN_THUMBNAIL_ZOOM, MAX_THUMBNAIL_ZOOM);
-        self.sidebar_section_order = SidebarSection::sanitized_order(self.sidebar_section_order);
+        self.sidebar_section_order = SidebarSection::sanitized_order(&self.sidebar_section_order);
         self.view_text_font_size = self
             .view_text_font_size
             .clamp(MIN_VIEW_TEXT_FONT_SIZE, MAX_VIEW_TEXT_FONT_SIZE);
@@ -603,7 +611,7 @@ mod tests {
         );
         assert_eq!(back.view_text_font_size, original.view_text_font_size);
         assert_eq!(back.view_item_spacing, original.view_item_spacing);
-        assert_eq!(back.sidebar_section_order, SidebarSection::DEFAULT_ORDER);
+        assert_eq!(back.sidebar_section_order, SidebarSection::DEFAULT_ORDER.to_vec());
         assert!(back.sidebar_shortcut_redirects.is_empty());
     }
 
@@ -648,7 +656,7 @@ mod tests {
         assert_eq!(cfg.view_text_font_size, DEFAULT_VIEW_TEXT_FONT_SIZE);
         assert_eq!(cfg.view_item_spacing, MIN_VIEW_ITEM_SPACING);
         // The global order absent from an old config falls back to the historical order.
-        assert_eq!(cfg.sidebar_section_order, SidebarSection::DEFAULT_ORDER);
+        assert_eq!(cfg.sidebar_section_order, SidebarSection::DEFAULT_ORDER.to_vec());
     }
 
     #[test]
@@ -661,11 +669,12 @@ mod tests {
         ));
         assert_eq!(
             cfg.sidebar_section_order,
-            [
+            vec![
                 SidebarSection::Network,
+                SidebarSection::Path,
+                SidebarSection::Favorites,
                 SidebarSection::Drives,
                 SidebarSection::Shortcuts,
-                SidebarSection::Favorites,
             ]
         );
         assert!(!SidebarSection::reorder(
@@ -676,7 +685,7 @@ mod tests {
         assert!(SidebarSection::reorder(
             &mut cfg.sidebar_section_order,
             SidebarSection::Drives,
-            3
+            1
         ));
 
         let serialized = toml::to_string_pretty(&cfg).unwrap();
@@ -708,7 +717,7 @@ mod tests {
     #[test]
     fn sidebar_order_sanitization_repairs_duplicate_manual_config() {
         let cfg = Config {
-            sidebar_section_order: [
+            sidebar_section_order: vec![
                 SidebarSection::Network,
                 SidebarSection::Network,
                 SidebarSection::Drives,
@@ -720,9 +729,12 @@ mod tests {
         let path = dir.join("config.toml");
         cfg.save(&path).unwrap();
         let repaired = Config::load_or_default(&path).unwrap();
+        // Duplicates dropped, the missing sections appended, and `Path` — which
+        // the input predates — moved from the bottom to the top.
         assert_eq!(
             repaired.sidebar_section_order,
-            [
+            vec![
+                SidebarSection::Path,
                 SidebarSection::Network,
                 SidebarSection::Drives,
                 SidebarSection::Shortcuts,
@@ -730,6 +742,46 @@ mod tests {
             ]
         );
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sidebar_order_gains_the_path_section_when_an_old_config_lacks_it() {
+        // Exactly the shape a previous build wrote: four entries, no `path`.
+        let order = SidebarSection::sanitized_order(&[
+            SidebarSection::Drives,
+            SidebarSection::Favorites,
+            SidebarSection::Shortcuts,
+            SidebarSection::Network,
+        ]);
+        assert_eq!(
+            order,
+            vec![
+                SidebarSection::Path,
+                SidebarSection::Drives,
+                SidebarSection::Favorites,
+                SidebarSection::Shortcuts,
+                SidebarSection::Network,
+            ]
+        );
+
+        // A config that already names `Path` keeps the user's own placement.
+        let moved = SidebarSection::sanitized_order(&[
+            SidebarSection::Path,
+            SidebarSection::Drives,
+            SidebarSection::Favorites,
+            SidebarSection::Shortcuts,
+            SidebarSection::Network,
+        ]);
+        assert_eq!(
+            moved,
+            vec![
+                SidebarSection::Path,
+                SidebarSection::Drives,
+                SidebarSection::Favorites,
+                SidebarSection::Shortcuts,
+                SidebarSection::Network,
+            ]
+        );
     }
 
     #[test]

@@ -79,9 +79,24 @@ export struct SidebarPlace {
     space-hint: string,
 }
 
-// A FLATTENED node of the favorites tree. `is-container` distinguishes a
-// container (favorites folder) from a favorite (leaf pointing to `path`). The
-// bridge only emits VISIBLE nodes (collapsed container = descendants hidden).
+// A row of the ADDRESS TREE in the sidebar: the active view's context, listed
+// flat and distinguished by a role rather than by nesting.
+//
+// `depth` only ever takes two values: 0 for the ancestry, the current folder
+// and its siblings (one list, read top to bottom) and 1 for the sub-folders of
+// the current one. The ancestry is drawn as a vertical thread ended by a dot,
+// which is what separates "the road I came by" from "places I can go", without
+// spending an indent level on it.
+export struct PathNode {
+    label: string,
+    path: string,
+    depth: int,
+    // 0 = ancestor, 1 = current folder, 2 = sub-folder, 3 = sibling.
+    role: int,
+    // False when the folder exists but cannot be entered (permissions).
+    available: bool,
+}
+
 // An "opener" (Open with) on the GUI side: id + label + availability
 // (program not found → greyed out). `default-exts` shown in settings.
 export struct OpenerItem {
@@ -500,10 +515,6 @@ export global Strings {
     in-out property <string> annotations-cleanup-all;        // "Select all"
     in-out property <string> annotations-cleanup-none;       // "Deselect all"
     in-out property <string> annotations-cleanup-empty;      // nothing left to sweep
-    in-out property <string> settings-annotations-cleaned;   // toast: how many entries went
-    in-out property <string> theme-auto;
-    in-out property <string> theme-light;
-    in-out property <string> theme-dark;
 
     in-out property <string> col-name;
     in-out property <string> col-path;
@@ -531,7 +542,6 @@ export global Strings {
     in-out property <string> fav-collapse-all;
     in-out property <string> fav-expand-all;
     in-out property <string> fav-empty;
-    in-out property <string> fav-container-empty;
     in-out property <string> fav-open;
     in-out property <string> fav-execute;
     in-out property <string> fav-open-all;
@@ -548,17 +558,8 @@ export global Strings {
     in-out property <string> fav-popup-container;
     in-out property <string> fav-popup-parent;
     in-out property <string> fav-popup-new;
-    in-out property <string> fav-popup-root;
     in-out property <string> fav-save;
-    in-out property <string> fav-toast-added;
-    in-out property <string> fav-toast-missing;
-    in-out property <string> fav-toast-exists;          // warning: duplicate favorite
 
-    in-out property <string> footer-items-singular;
-    in-out property <string> footer-items-plural;
-    in-out property <string> footer-empty;
-    in-out property <string> footer-selected-singular;
-    in-out property <string> footer-selected-plural;
 
     in-out property <string> nav-prev;
     in-out property <string> nav-next;
@@ -594,11 +595,7 @@ export global Strings {
     in-out property <string> tab-unavailable-file-hint;
     in-out property <string> tab-duplicate;         // tab context menu: duplicate
     in-out property <string> tab-reopen-closed;     // dead-zone menu: last closed tab
-    in-out property <string> tab-close-tooltip;
 
-    in-out property <string> panel-prefix;
-    in-out property <string> panel-new-tooltip;
-    in-out property <string> panel-close-tooltip;
     in-out property <string> panel-move-tooltip;     // grip: drag this view onto another
     in-out property <string> panel-split-view;
     in-out property <string> split-side-by-side;
@@ -679,8 +676,6 @@ export global Strings {
     in-out property <string> settings-columns-section;   // "Default columns"
     // MORE EXPLICIT labels in the checkbox for the columns reserved for
     // images (the column header itself stays short).
-    in-out property <string> settings-col-resolution;
-    in-out property <string> settings-col-depth;
     in-out property <string> settings-rmtime-label;
     in-out property <string> settings-rmtime-hint;
     in-out property <string> settings-fsize-label;      // "Folder size"
@@ -708,7 +703,6 @@ export global Strings {
     in-out property <string> shortcut-reset-all-confirm;
     in-out property <string> shortcut-reset-tooltip;
     in-out property <string> shortcut-listening;
-    in-out property <string> shortcut-capture-cancel;
     in-out property <string> shortcut-unassigned;
     in-out property <string> shortcut-unassign;       // context menu: remove the shortcut
     in-out property <string> shortcut-no-results;
@@ -738,16 +732,7 @@ export global Strings {
     in-out property <string> drag-open-with;               // "Open with this program"
 
     // Progress bar for long operations.
-    in-out property <string> op-copying;
-    in-out property <string> op-moving;
     in-out property <string> op-deleting;
-    in-out property <string> op-deleting-permanently;
-    in-out property <string> op-duplicating;
-    in-out property <string> op-scanning;
-    in-out property <string> op-done;
-    in-out property <string> op-cancelled;
-    in-out property <string> op-errors;           // e.g.: "Finished with errors"
-    in-out property <string> op-items;            // e.g.: "items" (trash counter)
 
     // Named workspaces
     in-out property <string> ws-tooltip;               // top bar button tooltip
@@ -795,6 +780,7 @@ export global Strings {
     in-out property <string> sidebar-tooltip;          // toggle button tooltip
     in-out property <string> sidebar-shortcuts;        // shortcuts section header
     in-out property <string> sidebar-drives;           // drives section header
+    in-out property <string> sidebar-path;            // address tree section header
     in-out property <string> sidebar-network;          // network section header
     in-out property <string> net-ejected;              // toast: device removed
     in-out property <string> net-disconnected;         // toast: network drive disconnected
@@ -823,6 +809,7 @@ export global Strings {
     // Cross-view drag'n'drop: drop menu
     in-out property <string> drop-move;                // "Move here"
     in-out property <string> drop-copy;                // "Copy here"
+    in-out property <string> drop-menu;                // "Choose action…" (Ctrl+Shift)
     in-out property <string> drop-split;               // "Split here"
     in-out property <string> drop-link;                // "Link here"
     in-out property <string> drop-favorite;            // "Add to favorites" (drag over the favorites)
@@ -830,11 +817,8 @@ export global Strings {
     in-out property <string> drop-detach;              // "Detach" (a view carried out of the window)
 
     in-out property <string> ws-reset;                 // "Start a new workspace" button
-    in-out property <string> ws-new-name;              // "new workspace" target name in the dialog
-    in-out property <string> ws-toast-reset;           // toast after reset
     in-out property <string> ws-sort-newest;           // "newest first" sort label
     in-out property <string> ws-sort-oldest;           // "oldest first" sort label
-    in-out property <string> ws-sort-tooltip;          // sort-direction toggle button tooltip
     // Open with
     in-out property <string> ow-choose;
     in-out property <string> ow-pick-browse;
@@ -858,10 +842,8 @@ export global Strings {
     in-out property <string> ow-tag-uri;
     in-out property <string> ow-tag-files;
     in-out property <string> ow-preview;
-    in-out property <string> ow-add-suggested;
     in-out property <string> ow-recipes-label;   // section title, also its accessible label
     in-out property <string> ow-recipes-hint;    // what the recipes are and why some are absent
-    in-out property <string> ow-launch;
     in-out property <string> ow-default-ext;
     in-out property <string> ow-set-default;     // "Set as default" checkbox of the app picker
     in-out property <string> ow-display-other-apps; // Linux picker: include launchers without MimeType
@@ -8887,6 +8869,171 @@ component Sidebar inherits Rectangle {
     }
 }
 
+// One line of the address tree.
+//
+// Deliberately iconless: the folder glyph repeated six times down the ancestry
+// says nothing, and the vertical thread does the work instead. Rows sit at one
+// of two indents — the flat list (ancestry, current, siblings) at zero, the
+// sub-folders of the current folder at one — so `role` carries the meaning and
+// the geometry only separates the two groups.
+component AddressRow inherits Rectangle {
+    in property <PathNode> node;
+    callback clicked();
+    callback double-clicked();
+
+    height: 26px;
+    border-radius: Tokens.radius-row;
+
+    // 0 for the flat list, 14px for sub-folders.
+    property <length> indent: root.node.depth * 14px;
+    // Ancestors and the current folder sit ON the thread; sub-folders and
+    // siblings sit beside it, which is what tells the two groups apart.
+    property <bool> on-thread: root.node.role == 0 || root.node.role == 1;
+    property <bool> is-current: root.node.role == 1;
+    // Ancestors are the road already travelled: present, but not a target.
+    property <bool> dimmed: root.node.role == 0 || !root.node.available;
+
+    background: touch.has-hover && root.node.available
+        ? Theme.accent-background.with-alpha(0.14)
+        : transparent;
+
+    // The thread: a hairline per row, so consecutive rows join into one line
+    // down the ancestry.
+    if root.on-thread : Rectangle {
+        x: 10px;
+        y: 0px;
+        // The current row only draws the upper half, leaving the dot the lower
+        // half — that is what ends the thread.
+        height: root.is-current ? parent.height / 2 : parent.height;
+        width: 1px;
+        background: Theme.border;
+    }
+
+    // The current folder: a filled dot closing the thread.
+    if root.is-current : Rectangle {
+        x: 7.5px;
+        y: (parent.height - 5px) / 2;
+        width: 5px;
+        height: 5px;
+        border-radius: 2.5px;
+        background: Theme.accent-background;
+    }
+
+    Text {
+        // Text starts clear of the thread for every row on the flat list, so
+        // ancestors, the current folder and its siblings share one left edge.
+        x: 10px + root.indent + 10px;
+        y: 0px;
+        width: max(0px, parent.width - self.x - 8px);
+        height: parent.height;
+        text: root.node.label;
+        color: root.is-current
+            ? Theme.accent-background
+            : Theme.foreground.with-alpha(root.dimmed ? 0.45 : 0.92);
+        font-size: 12px;
+        font-weight: root.is-current ? 600 : 400;
+        overflow: elide;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: root.node.available ? pointer : default;
+        clicked => { if (root.node.available) { root.clicked(); } }
+        double-clicked => { if (root.node.available) { root.double-clicked(); } }
+    }
+}
+
+// The address tree, as a sidebar section.
+//
+// Single click navigates, double click opens a view beside — so the click has to
+// be held back briefly. Without that delay the first click would already have
+// navigated, the tree would have been rebuilt for the new location, and the
+// second click would land on whatever folder happened to occupy that spot.
+// 250ms is the usual compromise: below the ~500ms of a system double click,
+// above the point where a single click starts to feel ignored.
+component AddressSection inherits Rectangle {
+    in property <[PathNode]> nodes;
+    in property <int> section-code;
+    in property <string> title;
+    in property <bool> collapsed: false;
+    in property <bool> header-visible: true;
+    in property <bool> reorder-drag-active: false;
+    in property <int> reorder-drag-source: -1;
+    callback navigate(string /*path*/);
+    callback open-in-new-view(string /*path*/);
+    callback section-toggled();
+    callback section-drag-started(int, length, length);
+    callback section-drag-moved(int, length, length);
+    callback section-drag-dropped(int, length, length);
+
+    background: Theme.toolbar;
+    opacity: root.reorder-drag-active && root.reorder-drag-source == root.section-code ? 0.55 : 1.0;
+
+    // The click being held back, waiting to see whether a second one follows.
+    property <string> pending-path: "";
+    // IMPORTANT: driven by reactive state, never `running: false` + restart().
+    // A constant `running` is re-evaluated on the next layout pass and cancels
+    // the pending fire, so the single click would never navigate at all — the
+    // same trap the rename delay documents. Clearing the path both performs the
+    // navigation and stops the timer; a double click clears it first, and that
+    // is what cancels the navigation.
+    click-delay := Timer {
+        interval: 250ms;
+        running: root.pending-path != "";
+        triggered => {
+            if (root.pending-path != "") {
+                root.navigate(root.pending-path);
+                root.pending-path = "";
+            }
+        }
+    }
+
+    VerticalLayout {
+        padding: 0px;
+        spacing: 0px;
+        if root.header-visible : SidebarSectionHeader {
+            section-code: root.section-code;
+            label: root.title;
+            collapsed: root.collapsed;
+            reorder-drag-active: root.reorder-drag-active;
+            toggled => { root.section-toggled(); }
+            drag-started(section, x, y) => { root.section-drag-started(section, x, y); }
+            drag-moved(section, x, y) => { root.section-drag-moved(section, x, y); }
+            drag-dropped(section, x, y) => { root.section-drag-dropped(section, x, y); }
+        }
+        path-scroll := ScrollView {
+            vertical-stretch: 1;
+            visible: !root.collapsed;
+            min-height: 0px;
+            max-height: root.collapsed ? 0px : root.nodes.length * 26px;
+            content-height: max(self.height, root.nodes.length * 26px);
+            VerticalLayout {
+                padding: 0px;
+                spacing: 0px;
+                for n in root.nodes : HorizontalLayout {
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    address-row := AddressRow {
+                        node: n;
+                        clicked => {
+                            // Setting the path is what arms the timer (it is
+                            // bound to this being non-empty): no explicit start.
+                            root.pending-path = n.path;
+                        }
+                        double-clicked => {
+                            // Clearing the path disarms the timer before it can
+                            // fire: only the new view opens, not a navigation
+                            // followed by it.
+                            root.pending-path = "";
+                            root.open-in-new-view(n.path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // A row of the favorites tree: container or favorite, indented by
 // depth. PURELY visual on the chevron side (left click expands a
 // container / opens a favorite, handled by the parent via `activate`).
@@ -10385,6 +10532,7 @@ export component MainWindow inherits Window {
     callback action-delete();
     callback action-delete-permanent();
     callback action-restore-last-trashed();
+    callback action-undo();
     // Internal deliveries from the trash workers, drained on the UI thread.
     callback process-op-events();
     callback action-properties();
@@ -11094,13 +11242,21 @@ export component MainWindow inherits Window {
     callback fav-expand-all();
     // Collapse of the Favorites SECTION — hides the tree in the unified column.
     in-out property <bool> fav-section-collapsed: false;
-    // The three other collapsible sections of the left column. These four
-    // properties are restored from the workspace by the bridge.
+    // The collapsible sections of the left column. These properties are
+    // restored from the workspace by the bridge.
     in-out property <bool> sidebar-shortcuts-collapsed: false;
     in-out property <bool> sidebar-drives-collapsed: false;
     in-out property <bool> sidebar-network-collapsed: false;
-    callback sidebar-section-state-changed(int /*0 drives · 1 shortcuts · 2 favorites · 3 network*/,
+    in-out property <bool> sidebar-path-collapsed: false;
+    // Address tree of the ACTIVE view: ancestry, the folder itself, its
+    // sub-folders, then its siblings.
+    in-out property <[PathNode]> sidebar-path-nodes;
+    callback sidebar-section-state-changed(int /*0 drives · 1 shortcuts · 2 favorites · 3 network · 4 path*/,
         bool /*collapsed*/);
+    // Address tree: a single click navigates, a double click opens a view
+    // beside the current one.
+    callback path-node-navigate(string /*path*/);
+    callback path-node-open-in-new-view(string /*path*/);
     function toggle-sidebar-section(section: int) {
         if (section == 0) {
             root.sidebar-drives-collapsed = !root.sidebar-drives-collapsed;
@@ -11114,16 +11270,20 @@ export component MainWindow inherits Window {
         } else if (section == 3) {
             root.sidebar-network-collapsed = !root.sidebar-network-collapsed;
             root.sidebar-section-state-changed(3, root.sidebar-network-collapsed);
+        } else if (section == 4) {
+            root.sidebar-path-collapsed = !root.sidebar-path-collapsed;
+            root.sidebar-section-state-changed(4, root.sidebar-path-collapsed);
         }
     }
     // Rank in the global preference. The fallback preserves the historical
     // order during the very first milliseconds, before the bridge's push.
     pure function sidebar-section-rank(section: int) -> int {
-        if (root.sidebar-section-order.length == 4) {
+        if (root.sidebar-section-order.length == 5) {
             if (root.sidebar-section-order[0] == section) { return 0; }
             if (root.sidebar-section-order[1] == section) { return 1; }
             if (root.sidebar-section-order[2] == section) { return 2; }
             if (root.sidebar-section-order[3] == section) { return 3; }
+            if (root.sidebar-section-order[4] == section) { return 4; }
         }
         return section;
     }
@@ -11131,12 +11291,14 @@ export component MainWindow inherits Window {
         if (section == 0) { return drives-section.y; }
         if (section == 1) { return shortcuts-section.y; }
         if (section == 2) { return fav-panel.y; }
+        if (section == 4) { return path-section.y; }
         return network-section.y;
     }
     pure function sidebar-section-bottom(section: int) -> length {
         if (section == 0) { return drives-section.y + drives-section.height; }
         if (section == 1) { return shortcuts-section.y + shortcuts-section.height; }
         if (section == 2) { return fav-panel.y + fav-panel.height; }
+        if (section == 4) { return path-section.y + path-section.height; }
         return network-section.y + network-section.height;
     }
     pure function sidebar-section-header-middle(section: int) -> length {
@@ -11144,13 +11306,15 @@ export component MainWindow inherits Window {
         // must never enlarge its reordering toggle zone.
         return root.sidebar-section-top(section) + 15px;
     }
-    // Final index after removal then insertion. Only the centers of the three
-    // (remaining) HEADERS matter: identical behavior whether the section is collapsed or very tall.
+    // Final index after removal then insertion. Only the centers of the
+    // HEADERS matter: identical behavior whether the section is collapsed or
+    // very tall.
     pure function sidebar-section-target-at(source: int, local-y: length) -> int {
         return (source != 0 && local-y > root.sidebar-section-header-middle(0) ? 1 : 0)
             + (source != 1 && local-y > root.sidebar-section-header-middle(1) ? 1 : 0)
             + (source != 2 && local-y > root.sidebar-section-header-middle(2) ? 1 : 0)
-            + (source != 3 && local-y > root.sidebar-section-header-middle(3) ? 1 : 0);
+            + (source != 3 && local-y > root.sidebar-section-header-middle(3) ? 1 : 0)
+            + (source != 4 && local-y > root.sidebar-section-header-middle(4) ? 1 : 0);
     }
     pure function sidebar-section-remaining-rank(section: int, source: int) -> int {
         return root.sidebar-section-rank(section)
@@ -11160,7 +11324,8 @@ export component MainWindow inherits Window {
         if (source != 0 && root.sidebar-section-remaining-rank(0, source) == rank) { return 0; }
         if (source != 1 && root.sidebar-section-remaining-rank(1, source) == rank) { return 1; }
         if (source != 2 && root.sidebar-section-remaining-rank(2, source) == rank) { return 2; }
-        return 3;
+        if (source != 3 && root.sidebar-section-remaining-rank(3, source) == rank) { return 3; }
+        return 4;
     }
     function update-sidebar-section-drag(section: int, abs-x: length, abs-y: length) {
         if (!root.sidebar-section-drag-active || section != root.sidebar-section-drag-source) { return; }
@@ -11425,6 +11590,7 @@ export component MainWindow inherits Window {
         if (id == "delete") { root.action-delete(); return; }
         if (id == "delete-permanent") { root.action-delete-permanent(); return; }
         if (id == "restore-trash") { root.action-restore-last-trashed(); return; }
+        if (id == "undo") { root.action-undo(); return; }
         if (id == "new-folder") { root.create-kind = 0; root.create-name = ""; root.create-target = ""; root.create-popup-open = root.search-root-action-allowed(); return; }
         if (id == "new-file") { root.create-kind = 1; root.create-name = ""; root.create-target = ""; root.create-popup-open = root.search-root-action-allowed(); return; }
         if (id == "terminal") { root.action-open-terminal(); return; }
@@ -11793,6 +11959,25 @@ export component MainWindow inherits Window {
                             place-right-clicked(path, kind, removable, hotplug, device, x, y) => {
                                 root.open-sidebar-place-context(path, kind, removable, hotplug, device, x, y);
                             }
+                        }
+                        path-section := AddressSection {
+                            row: root.sidebar-section-rank(4);
+                            col: 0;
+                            nodes: root.sidebar-path-nodes;
+
+                            section-code: 4;
+                            title: Strings.sidebar-path;
+                            collapsed: root.sidebar-path-collapsed;
+                            reorder-drag-active: root.sidebar-section-drag-active;
+                            reorder-drag-source: root.sidebar-section-drag-source;
+                            changed y => { root.refresh-sidebar-section-drag-geometry(); }
+                            changed height => { root.refresh-sidebar-section-drag-geometry(); }
+                            section-toggled => { root.toggle-sidebar-section(4); }
+                            section-drag-started(section, x, y) => { root.start-sidebar-section-drag(section, x, y); }
+                            section-drag-moved(section, x, y) => { root.update-sidebar-section-drag(section, x, y); }
+                            section-drag-dropped(section, x, y) => { root.drop-sidebar-section-drag(section, x, y); }
+                            navigate(path) => { root.path-node-navigate(path); }
+                            open-in-new-view(path) => { root.path-node-open-in-new-view(path); }
                         }
                         shortcuts-section := Sidebar {
                             row: root.sidebar-section-rank(1);
@@ -18090,7 +18275,9 @@ export component MainWindow inherits Window {
                                         ? @image-url("../../assets/icons/folder.svg")
                                         : (root.file-drag-action == 1
                                         ? @image-url("../../assets/icons/plus.svg")
-                                        : @image-url("../../assets/icons/move.svg"))))));
+                                        : (root.file-drag-action < 0
+                                        ? @image-url("../../assets/icons/equalize.svg")
+                                        : @image-url("../../assets/icons/move.svg")))))));
                         colorize: Theme.accent-foreground;
                     }
                 }
@@ -18105,7 +18292,8 @@ export component MainWindow inherits Window {
                             ? Strings.drag-open-with
                             : (root.folder-open-drag-active
                                 ? (drag-pill.split-drop ? Strings.drop-split : Strings.ctx-open-new-tab)
-                                : (root.file-drag-action == 1 ? Strings.drop-copy : Strings.drop-move))));
+                                : (root.file-drag-action == 1 ? Strings.drop-copy
+                                    : (root.file-drag-action < 0 ? Strings.drop-menu : Strings.drop-move)))));
                     font-size: 11px;
                     color: Theme.accent-foreground;
                     vertical-alignment: center;

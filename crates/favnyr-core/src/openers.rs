@@ -411,39 +411,19 @@ pub struct OpenerStore {
     pub openers: Vec<Opener>,
 }
 
+impl crate::store::TomlStore for OpenerStore {
+    const LABEL: &'static str = "unreadable store";
+}
+
 impl OpenerStore {
     /// Loads from `path`; empty store if missing/unreadable (never fatal).
     pub fn load(path: &Path) -> Self {
-        match std::fs::read_to_string(path) {
-            Ok(content) => match toml::from_str(&content) {
-                Ok(store) => store,
-                Err(err) => {
-                    // The file is there but cannot be read back. Starting from
-                    // an empty store keeps the application usable; letting the
-                    // next save write that emptiness over the user's only copy
-                    // does not, so the file is kept aside first.
-                    tracing::warn!(
-                        error = %err,
-                        path = %path.display(),
-                        "unreadable store"
-                    );
-                    crate::paths::preserve_unreadable(path);
-                    Self::default()
-                }
-            },
-            Err(_) => Self::default(),
-        }
+        crate::store::load(path)
     }
 
     /// Writes the store as TOML (creates the parent folder).
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let s = toml::to_string_pretty(self)
-            .map_err(|e| Error::Openers(format!("serialization: {e}")))?;
-        crate::paths::write_atomic(path, &s)?;
-        Ok(())
+        crate::store::save(path, self, |e| Error::Openers(format!("serialization: {e}")))
     }
 
     /// Adds an opener (normalized label/program/args). Returns its `id`.

@@ -164,19 +164,48 @@ impl ViewState {
     }
 }
 
-/// State of the four collapsible sections of the left sidebar. All
-/// fields default to `false` so that an old workspace without this table
-/// keeps its sections expanded.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// State of the collapsible sections of the left sidebar.
+///
+/// A field left out of an older workspace keeps its DEFAULT, which is what
+/// makes this struct safe to extend: adding a section only requires giving it a
+/// default that matches how the sidebar should look out of the box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SidebarSectionsState {
-    #[serde(default)]
+    #[serde(default = "collapsed_by_default")]
     pub shortcuts_collapsed: bool,
     #[serde(default)]
     pub favorites_collapsed: bool,
-    #[serde(default)]
+    #[serde(default = "collapsed_by_default")]
     pub drives_collapsed: bool,
-    #[serde(default)]
+    #[serde(default = "collapsed_by_default")]
     pub network_collapsed: bool,
+    /// The address tree of the active view. Expanded, like Favorites: the two
+    /// are what a session actually navigates by, while the drive list, the
+    /// standard locations and the network shares are places visited rarely.
+    #[serde(default)]
+    pub path_collapsed: bool,
+}
+
+/// Sections that start folded on a fresh sidebar.
+///
+/// Only Favorites and Path start open: between them they cover "where am I" and
+/// "where do I go often", which is what the sidebar is for. The drive list, the
+/// standard locations and the network shares are used occasionally and were
+/// pushing the useful part below the fold.
+fn collapsed_by_default() -> bool {
+    true
+}
+
+impl Default for SidebarSectionsState {
+    fn default() -> Self {
+        Self {
+            shortcuts_collapsed: collapsed_by_default(),
+            favorites_collapsed: false,
+            drives_collapsed: collapsed_by_default(),
+            network_collapsed: collapsed_by_default(),
+            path_collapsed: false,
+        }
+    }
 }
 
 impl SidebarSectionsState {
@@ -241,14 +270,9 @@ impl WorkspaceState {
 
     /// Writes the workspace to disk (creates parent folders as needed).
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let text = toml::to_string_pretty(self).map_err(|e| {
+        crate::store::save(path, self, |e| {
             crate::error::Error::Workspace(format!("serialize {}: {e}", path.display()))
-        })?;
-        crate::paths::write_atomic(path, &text)?;
-        Ok(())
+        })
     }
 
     /// Returns the validated layout tree: the stored tree if it covers
@@ -907,11 +931,15 @@ item_arrangement = "future"
         assert_eq!(restored.sidebar_sections, SidebarSectionsState::default());
 
         let mut ws = sample();
+        // Every flag is the OPPOSITE of its default: the point of this test is
+        // that a state differing from the default survives a round trip, and the
+        // default itself is deliberately omitted from the TOML.
         ws.sidebar_sections = SidebarSectionsState {
-            shortcuts_collapsed: true,
-            favorites_collapsed: false,
-            drives_collapsed: true,
-            network_collapsed: true,
+            shortcuts_collapsed: false,
+            favorites_collapsed: true,
+            drives_collapsed: false,
+            network_collapsed: false,
+            path_collapsed: true,
         };
         let serialized = toml::to_string_pretty(&ws).unwrap();
         assert!(serialized.contains("sidebar_sections"));

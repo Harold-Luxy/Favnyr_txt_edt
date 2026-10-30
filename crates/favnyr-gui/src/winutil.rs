@@ -31,10 +31,9 @@ use windows::Win32::Graphics::Gdi::{
     HBITMAP, HGDIOBJ, ReleaseDC,
 };
 
-/// NUL-terminated wide (UTF-16) string for the Win32 `*W` APIs.
-pub fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
+/// NUL-terminated wide (UTF-16) string for the Win32 `*W` APIs — the shared
+/// core helper, re-exported under this module's long-standing name.
+pub use favnyr_core::win32::wide_text as wide;
 
 /// RGBA pixels `(buf, w, h)` of a 32 bpp `HBITMAP` via GDI (`GetObjectW` +
 /// `GetDIBits`), converted BGRA→RGBA, alpha forced opaque if the bitmap has no
