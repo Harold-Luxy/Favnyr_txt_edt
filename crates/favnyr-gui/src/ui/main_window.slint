@@ -506,6 +506,10 @@ export global Strings {
     in-out property <string> settings-compact-preview-label;
     in-out property <string> settings-thumbnail-zoom-label;
     in-out property <string> settings-thumbnail-zoom-hint;
+    in-out property <string> settings-gutter-label;    // left-gutter double-click
+    in-out property <string> settings-gutter-hint;
+    in-out property <string> settings-gutter-select-all;
+    in-out property <string> settings-gutter-go-parent;
     in-out property <string> settings-compact-preview-hint;
     // "Colors and notes" cleanup section.
     in-out property <string> settings-annotations-title;
@@ -4831,6 +4835,11 @@ component PanelComponent inherits Rectangle {
 
     // Callbacks emitted to MainWindow (which dispatches to the active panel).
     callback activate();
+    /// What a double-click in this panel's left gutter does, as the
+    /// `GutterDoubleClick` index: 0 = select all, 1 = go to the parent folder.
+    /// A preference rather than a constant because the strip has no item of its
+    /// own to act on, so both answers are reasonable.
+    in property <int> gutter-double-click: 0;
     callback go-back();
     callback go-forward();
     callback go-parent();
@@ -7042,7 +7051,15 @@ component PanelComponent inherits Rectangle {
                         // `activate` first, because the selection callback acts
                         // on the ACTIVE view.
                         root.activate();
-                        root.select-all();
+                        if (root.gutter-double-click == 1) {
+                            // The user asked the gutter to mean "one level up"
+                            // instead. At a drive root the bridge finds no
+                            // parent and nothing happens, which is the
+                            // intended "already there" answer.
+                            root.go-parent();
+                        } else {
+                            root.select-all();
+                        }
                     }
                 }
             }
@@ -9726,6 +9743,10 @@ export component MainWindow inherits Window {
     // Display mode used by newly created tabs and views.
     in-out property <int> default-view-mode-index: 0;
     callback default-view-mode-changed(int);
+    /// What a double-click in a listing's left gutter does
+    /// (`GutterDoubleClick`: 0 = select all, 1 = go to the parent folder).
+    in-out property <int> gutter-double-click-index: 0;
+    callback gutter-double-click-changed(int);
     in-out property <int> default-item-arrangement-index: 0;
     callback default-item-arrangement-changed(int);
     in-out property <bool> default-show-hidden: false;
@@ -12357,6 +12378,7 @@ export component MainWindow inherits Window {
                     drag-abs-x: root.folder-open-drag-active ? root.file-drag-abs-x : root.drag-abs-x;
                     drag-abs-y: root.folder-open-drag-active ? root.file-drag-abs-y : root.drag-abs-y;
                     tab-tooltip-enabled: root.tab-tooltip-enabled;
+                    gutter-double-click: root.gutter-double-click-index;
                     is-drag-source: root.drag-active && idx == root.drag-source-panel;
                     // The panel under the cursor claims the drop target.
                     changed drag-zone => {
@@ -15426,6 +15448,36 @@ export component MainWindow inherits Window {
                                         current-index <=> root.default-view-mode-index;
                                         selected(_) => {
                                             root.default-view-mode-changed(settings-view-mode.current-index);
+                                        }
+                                    }
+                                }
+                                Rectangle { height: 1px; background: Theme.border; }
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        spacing: 3px;
+                                        Text {
+                                            text: Strings.settings-gutter-label;
+                                            font-size: 13px;
+                                            font-weight: 600;
+                                            color: Theme.foreground;
+                                            wrap: word-wrap;
+                                        }
+                                        Text {
+                                            text: Strings.settings-gutter-hint;
+                                            font-size: 11px;
+                                            color: Theme.foreground.with-alpha(0.55);
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    settings-gutter := ComboBox {
+                                        width: 160px;
+                                        vertical-stretch: 0;
+                                        model: [Strings.settings-gutter-select-all, Strings.settings-gutter-go-parent];
+                                        current-index <=> root.gutter-double-click-index;
+                                        selected(_) => {
+                                            root.gutter-double-click-changed(settings-gutter.current-index);
                                         }
                                     }
                                 }

@@ -53,6 +53,38 @@ impl WorkspaceLoadPolicy {
     }
 }
 
+/// What a double-click in the listing's left gutter does.
+///
+/// The gutter is the narrow strip left of the name column. It has no item of
+/// its own to open, so the gesture is free to mean something else — and two
+/// reasonable answers exist, which is why this is a preference rather than a
+/// fixed behaviour. `Select all` is the default: it is what the strip has
+/// always done, so an upgraded config keeps behaving as it did.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GutterDoubleClick {
+    GoParent,
+    #[default]
+    #[serde(other)]
+    SelectAll,
+}
+
+impl GutterDoubleClick {
+    pub fn from_index(index: i32) -> Self {
+        match index {
+            1 => Self::GoParent,
+            _ => Self::SelectAll,
+        }
+    }
+
+    pub fn index(self) -> i32 {
+        match self {
+            Self::SelectAll => 0,
+            Self::GoParent => 1,
+        }
+    }
+}
+
 /// Stable identity of a reorderable sidebar section.
 ///
 /// The order is a global application preference: the serialized names
@@ -168,6 +200,9 @@ pub struct Config {
     pub window_height: u32,
     /// Asks for confirmation before permanent deletion (bypassing the trash).
     pub confirm_permanent_delete: bool,
+    /// What a double-click in the listing's left gutter does.
+    #[serde(default)]
+    pub gutter_double_click: GutterDoubleClick,
     /// Logical width (px) of the sidebar.
     ///
     /// There is deliberately no field for the sidebar's OPEN state: it always
@@ -344,6 +379,7 @@ impl Default for Config {
             window_width: DEFAULT_WINDOW_WIDTH,
             window_height: DEFAULT_WINDOW_HEIGHT,
             confirm_permanent_delete: true,
+            gutter_double_click: GutterDoubleClick::default(),
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_section_order: SidebarSection::DEFAULT_ORDER.to_vec(),
             sidebar_shortcut_redirects: std::collections::BTreeMap::new(),
@@ -463,6 +499,42 @@ mod tests {
         assert!(!restored.grid_name_tooltip);
         assert!(!restored.search_path_tooltip);
         assert!(restored.tab_path_tooltip);
+    }
+
+    #[test]
+    fn gutter_double_click_defaults_to_select_all_and_round_trips() {
+        // An upgraded config has no key at all: the strip must keep doing what
+        // it always did rather than silently start navigating.
+        let old: Config = toml::from_str("").unwrap();
+        assert_eq!(old.gutter_double_click, GutterDoubleClick::SelectAll);
+
+        let changed = Config {
+            gutter_double_click: GutterDoubleClick::GoParent,
+            ..Config::default()
+        };
+        let restored: Config = toml::from_str(&toml::to_string(&changed).unwrap()).unwrap();
+        assert_eq!(restored.gutter_double_click, GutterDoubleClick::GoParent);
+    }
+
+    /// A hand-edited file with an unknown value keeps the old behaviour
+    /// instead of failing the whole document — which would take every other
+    /// preference down with it.
+    #[test]
+    fn an_unknown_gutter_value_falls_back_to_select_all() {
+        let cfg: Config = toml::from_str("gutter_double_click = \"nonsense\"").unwrap();
+        assert_eq!(cfg.gutter_double_click, GutterDoubleClick::SelectAll);
+    }
+
+    #[test]
+    fn gutter_double_click_index_maps_both_ways() {
+        for choice in [GutterDoubleClick::SelectAll, GutterDoubleClick::GoParent] {
+            assert_eq!(GutterDoubleClick::from_index(choice.index()), choice);
+        }
+        // Anything outside the list is the safe default.
+        assert_eq!(
+            GutterDoubleClick::from_index(99),
+            GutterDoubleClick::SelectAll
+        );
     }
 
     #[test]

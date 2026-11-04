@@ -31,9 +31,9 @@ use tracing::{debug, error, info, warn};
 
 use favnyr_core::SidebarSection;
 use favnyr_core::config::{
-    DEFAULT_THUMBNAIL_ZOOM, DEFAULT_VIEW_TEXT_FONT_SIZE, MAX_THUMBNAIL_ZOOM, MAX_VIEW_ITEM_SPACING,
-    MAX_VIEW_TEXT_FONT_SIZE, MIN_THUMBNAIL_ZOOM, MIN_VIEW_ITEM_SPACING, MIN_VIEW_TEXT_FONT_SIZE,
-    WorkspaceLoadPolicy,
+    DEFAULT_THUMBNAIL_ZOOM, DEFAULT_VIEW_TEXT_FONT_SIZE, GutterDoubleClick, MAX_THUMBNAIL_ZOOM,
+    MAX_VIEW_ITEM_SPACING, MAX_VIEW_TEXT_FONT_SIZE, MIN_THUMBNAIL_ZOOM, MIN_VIEW_ITEM_SPACING,
+    MIN_VIEW_TEXT_FONT_SIZE, WorkspaceLoadPolicy,
 };
 use favnyr_core::favorites::{self, FlatFav};
 use favnyr_core::folder_state::FolderStateStore;
@@ -1899,6 +1899,8 @@ pub fn install(window: &MainWindow, state: AppState) {
     // Display mode for newly created tabs and views (settings).
     window.set_default_view_mode_index(if cfg.default_preview_mode { 1 } else { 0 });
     window.set_default_thumbnail_zoom(cfg.default_thumbnail_zoom);
+    // What a double-click in a listing's left gutter does (settings).
+    window.set_gutter_double_click_index(cfg.gutter_double_click.index());
     window.set_default_item_arrangement_index(i32::from(
         cfg.default_item_arrangement == ItemArrangement::Grid,
     ));
@@ -3398,6 +3400,16 @@ pub fn install(window: &MainWindow, state: AppState) {
             let preview = idx == 1;
             info!(preview, "default view mode changed");
             st.persist_config(|c| c.default_preview_mode = preview);
+        });
+    }
+    // What a double-click in a listing's left gutter does. Applied to every
+    // view at once: it is a preference about the gesture, not about one tab.
+    {
+        let st = state.clone();
+        window.on_gutter_double_click_changed(move |index: i32| {
+            let choice = GutterDoubleClick::from_index(index);
+            info!(?choice, "gutter double-click changed");
+            st.persist_config(|c| c.gutter_double_click = choice);
         });
     }
     {

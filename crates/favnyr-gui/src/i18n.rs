@@ -253,6 +253,10 @@ fn apply_catalog(window: &MainWindow, c: &HashMap<String, String>) {
     strings.set_settings_compact_preview_label(g("settings_compact_preview_label"));
     strings.set_settings_thumbnail_zoom_label(g("settings_thumbnail_zoom_label"));
     strings.set_settings_thumbnail_zoom_hint(g("settings_thumbnail_zoom_hint"));
+    strings.set_settings_gutter_label(g("settings_gutter_label"));
+    strings.set_settings_gutter_hint(g("settings_gutter_hint"));
+    strings.set_settings_gutter_select_all(g("settings_gutter_select_all"));
+    strings.set_settings_gutter_go_parent(g("settings_gutter_go_parent"));
     strings.set_settings_compact_preview_hint(g("settings_compact_preview_hint"));
     strings.set_settings_annotations_title(g("settings_annotations_title"));
     strings.set_settings_annotations_hint(g("settings_annotations_hint"));
@@ -939,6 +943,10 @@ mod tests {
                 "ws_dirty_save_new",
                 "settings_thumbnail_zoom_label",
                 "settings_thumbnail_zoom_hint",
+                "settings_gutter_label",
+                "settings_gutter_hint",
+                "settings_gutter_select_all",
+                "settings_gutter_go_parent",
                 "settings_letter_layout",
                 "settings_letter_layout_tip",
                 "settings_letter_layout_off",
