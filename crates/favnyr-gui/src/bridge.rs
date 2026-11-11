@@ -1601,6 +1601,13 @@ impl AppState {
         // A single read at startup: subsequent live comparisons are
         // entirely in memory.
         state.reload_saved_workspace();
+        // Restored editor views arrive with their file and an EMPTY buffer
+        // (`editor_buffers` starts empty above), and `update_panels_ui` renders
+        // a missing buffer as an empty document. Loading them here is what makes
+        // the text come back after a restart — `replace_with_workspace` does the
+        // same when a workspace is switched, which is why switching worked and
+        // restarting did not.
+        state.reload_editor_buffers();
         state
     }
 
@@ -6663,6 +6670,11 @@ pub fn install(window: &MainWindow, state: AppState) {
             let multi_panel = st.panels.borrow().len() > 1;
             if only_tab_left && multi_panel {
                 let active_panel = *st.active_panel.borrow();
+                // Same rule as the panel's own ✕: an editor view turns into its
+                // folder instead of vanishing.
+                if close_editor_into_its_folder(&w, &st, active_panel) {
+                    return;
+                }
                 let closed_panel = {
                     let mut panels = st.panels.borrow_mut();
                     if active_panel >= panels.len()
@@ -6812,7 +6824,12 @@ pub fn install(window: &MainWindow, state: AppState) {
         let weak = window.as_weak();
         window.on_panel_closed(move |idx: i32| {
             let Some(w) = weak.upgrade() else { return };
-            if let Some(panel) = take_view(&st, idx.max(0) as usize) {
+            let idx = idx.max(0) as usize;
+            // An editor view becomes the folder its note lives in, in place.
+            if close_editor_into_its_folder(&w, &st, idx) {
+                return;
+            }
+            if let Some(panel) = take_view(&st, idx) {
                 remember_closed_panel(&st, panel);
                 w.set_closed_tabs_available(true);
                 switch_active_panel(&w, &st);
@@ -12417,6 +12434,61 @@ fn load_directory(window: &MainWindow, state: &AppState, target: &Path, push_his
 ///
 /// Shared by closing a view and by tearing one off. What differs between the
 /// two is what the caller does with the view it gets back, not how it leaves.
+/// Turning an editor view back into a folder view when it is closed.
+///
+/// Closing a note used to leave a HOLE: the view disappeared and the layout
+/// shuffled. The folder the note lives in is the useful thing to have in its
+/// place, and it keeps the layout the user arranged, so closing an editor view
+/// converts it in place.
+///
+/// Returns `true` when `idx` was an editor view and has been converted — the
+/// caller must then not close anything. A view whose file has no folder (a
+/// bare drive root, a pseudo-path) returns `false` so the ordinary close still
+/// applies.
+fn close_editor_into_its_folder(window: &MainWindow, state: &AppState, idx: usize) -> bool {
+    let file = {
+        let panels = state.panels.borrow();
+        let Some(panel) = panels.get(idx) else {
+            return false;
+        };
+        let Some(file) = panel.editor_file().map(Path::to_path_buf) else {
+            return false;
+        };
+        file
+    };
+    let Some(folder) = file.parent().map(Path::to_path_buf) else {
+        return false;
+    };
+    if folder.as_os_str().is_empty() {
+        return false;
+    }
+    // Any pending edit is written first, exactly as closing a view normally
+    // does: the buffer is about to be dropped.
+    save_editor(state, idx);
+    let config = state.snapshot_config();
+    let replacement = Panel::with_mode(
+        folder.clone(),
+        config.default_columns.clone(),
+        config.default_tab_bar_mode.min(2),
+        TabDisplayDefaults::from(&config),
+    );
+    {
+        let mut panels = state.panels.borrow_mut();
+        let Some(panel) = panels.get_mut(idx) else {
+            return false;
+        };
+        *panel = replacement;
+    }
+    // The entry goes WITHOUT the renumbering `drop_editor_buffer` does: no panel
+    // left the list, so every other index stays where it is.
+    state.editor_buffers.borrow_mut().remove(&idx);
+    *state.active_panel.borrow_mut() = idx;
+    switch_active_panel(window, state);
+    refresh_all_panels(window, state);
+    state.persist_workspace();
+    true
+}
+
 fn take_view(state: &AppState, idx: usize) -> Option<Panel> {
     let mut panels = state.panels.borrow_mut();
     if panels.len() <= 1 || idx >= panels.len() {
@@ -18478,66 +18550,67 @@ fn find_editor_view(state: &AppState, file: &Path) -> Option<usize> {
 
 fn open_editor_view(window: &MainWindow, state: &AppState, file: PathBuf) {
     let default_display = TabDisplayDefaults::from(&*state.config.borrow());
-    let created = {
+    // The editor view REPLACES the folder view it was opened from, in place: the
+    // layout the user arranged stays exactly as it is, and closing the note
+    // later turns the same spot back into that folder (see
+    // `close_editor_into_its_folder`). A second view left a duplicate listing
+    // nobody asked for.
+    //
+    // A panel is EITHER a folder view or an editor view — an editor view has no
+    // tab bar — so a replaced panel's other tabs cannot stay on screen. They go
+    // to the "reopen closed tab" history rather than vanishing.
+    let (idx, replaced) = {
         let mut panels = state.panels.borrow_mut();
-        if panels.len() >= MAX_PANELS {
-            None
-        } else {
-            let active = *state.active_panel.borrow();
-            let new_idx = panels.len();
-            let split_ok = state
-                .layout
-                .borrow_mut()
-                .split_leaf(active, SplitDir::Row, new_idx, 0.5, false);
-            if split_ok {
-                // The editor view mirrors the source view's chrome so the two
-                // line up visually; its columns are irrelevant but harmless.
-                let cols = panels
-                    .get(active)
-                    .map(|p| p.columns.clone())
-                    .unwrap_or_default();
-                let mode = panels
-                    .get(active)
-                    .map(|p| p.tab_bar_mode)
-                    .unwrap_or_default();
-                panels.push(Panel::editor_view(file, cols, mode, default_display));
-                Some(new_idx)
-            } else {
-                None
-            }
-        }
-    };
-
-    if let Some(idx) = created {
-        *state.active_panel.borrow_mut() = idx;
-        // Read the file BEFORE the view is published, so its first paint
-        // already shows the text instead of flashing an empty box.
-        let target = state.panels.borrow()[idx]
-            .editor_file()
-            .map(Path::to_path_buf);
-        if let Some(target) = target
-            && let Err(err) = load_editor_buffer(state, idx, &target)
-        {
-            warn!(error = %err, file = %target.display(), "loading the editor buffer failed");
-            let lang = state.snapshot_config().language;
-            let key = if std::fs::metadata(&target).map(|m| m.len() > MAX_EDITOR_BYTES).unwrap_or(false)
-            {
-                "editor_too_large"
-            } else {
-                "editor_missing_file"
-            };
-            notice(window, i18n::tr(lang, key), NoticeKind::Error);
-            // The view exists but has nothing to edit: drop it rather than
-            // leave an empty editor with no way back to the file.
-            if take_view(state, idx).is_some() {
-                switch_active_panel(window, state);
-            }
+        if panels.is_empty() {
             return;
         }
+        let active = (*state.active_panel.borrow()).min(panels.len() - 1);
+        let Some(panel) = panels.get_mut(active) else {
+            return;
+        };
+        // The editor view mirrors the source view's chrome so the two line up
+        // visually; its columns are irrelevant but harmless.
+        let cols = panel.columns.clone();
+        let mode = panel.tab_bar_mode;
+        let replaced = std::mem::replace(
+            panel,
+            Panel::editor_view(file.clone(), cols, mode, default_display),
+        );
+        (active, replaced)
+    };
+    *state.active_panel.borrow_mut() = idx;
+    // Read the file BEFORE the view is published, so its first paint already
+    // shows the text instead of flashing an empty box.
+    if let Err(err) = load_editor_buffer(state, idx, &file) {
+        warn!(error = %err, file = %file.display(), "loading the editor buffer failed");
+        let lang = state.snapshot_config().language;
+        let key = if std::fs::metadata(&file)
+            .map(|m| m.len() > MAX_EDITOR_BYTES)
+            .unwrap_or(false)
+        {
+            "editor_too_large"
+        } else {
+            "editor_missing_file"
+        };
+        notice(window, i18n::tr(lang, key), NoticeKind::Error);
+        // Nothing to edit: put the folder view back rather than leave an empty
+        // editor with no way to reach the folder again.
+        if let Some(panel) = state.panels.borrow_mut().get_mut(idx) {
+            *panel = replaced;
+        }
+        state.editor_buffers.borrow_mut().remove(&idx);
         switch_active_panel(window, state);
-        update_panels_ui(window, state);
-        state.persist_workspace();
+        refresh_all_panels(window, state);
+        return;
     }
+    // Only now, with the file proven readable, do the dropped tabs go to the
+    // reopen history: a failed open must leave the original view untouched.
+    if replaced.tabs.tabs.len() > 1 {
+        remember_closed_panel(state, replaced);
+    }
+    switch_active_panel(window, state);
+    update_panels_ui(window, state);
+    state.persist_workspace();
 }
 
 /// Largest file the editor view will open.
