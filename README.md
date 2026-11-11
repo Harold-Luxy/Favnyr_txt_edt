@@ -51,7 +51,17 @@ Two deliberate refusals:
 While the text editor has focus `Ctrl+Z` does nothing — it will not delete a
 file from under a half-written note.
 
-### 6. smaller, tidier binary
+### 6. your own order for the type sections
+Settings > **Type group order** lists the sections "group by type" produces,
+top to bottom, and lets you rearrange them: move a row up or down, delete it,
+or add a category or an extension (`doc,docx` bundles a whole format family
+into one section).
+
+Types you leave out keep their usual category order and sort below the list.
+Clearing the list returns to that built-in order, and the cleared state is
+remembered. Nothing changes unless the view is actually grouping by type.
+
+### 7. smaller, tidier binary
 The same 39 MB single portable file, with dead code and duplicated helpers
 removed. No installer, no runtime, no external DLLs.
 

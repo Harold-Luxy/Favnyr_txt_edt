@@ -23,6 +23,14 @@ import { ComboBox, VerticalBox, HorizontalBox, ScrollView, LineEdit, TextEdit, B
 // `width` and `offset` are computed by the bridge from the title, with a
 // width clamped to 90-180 px. Rendering and drop logic thus share
 // a geometry independent of the reactive layout.
+/// One row of the "Type group order" list in Settings.
+export struct TypeGroupRow {
+    /// 1-based position, shown as the section's number in the file view.
+    number: int,
+    /// What the row stands for: a category name or the extensions it bundles.
+    label: string,
+}
+
 export struct TabInfo {
     title: string,
     folder-slot: int,       // shared path annotation, 0 = unmarked
@@ -510,6 +518,24 @@ export global Strings {
     in-out property <string> settings-gutter-hint;
     in-out property <string> settings-gutter-select-all;
     in-out property <string> settings-gutter-go-parent;
+    // Settings > "Type group order" tab.
+    in-out property <string> settings-tab-type-groups;
+    in-out property <string> type-group-hint;
+    in-out property <string> type-group-empty;
+    in-out property <string> type-group-extension;
+    in-out property <string> type-group-add;
+    in-out property <string> type-group-clear;
+    in-out property <string> type-group-exists;
+    // Short names of the nine categories, also the add-dropdown's entries.
+    in-out property <string> kind-folder;
+    in-out property <string> kind-application;
+    in-out property <string> kind-archive;
+    in-out property <string> kind-image;
+    in-out property <string> kind-video;
+    in-out property <string> kind-audio;
+    in-out property <string> kind-document;
+    in-out property <string> kind-config;
+    in-out property <string> kind-file;
     in-out property <string> settings-compact-preview-hint;
     // "Colors and notes" cleanup section.
     in-out property <string> settings-annotations-title;
@@ -10916,6 +10942,19 @@ export component MainWindow inherits Window {
     // Active tab of the Settings panel: 0 = General, 1 = Shortcuts (key
     // management has its own page so it no longer weighs down "General").
     in-out property <int> settings-tab: 0;
+    // Settings > "Type group order": the rows, the add controls and the state
+    // the buttons need. The list is the effective one, so an untouched config
+    // shows the shipped default rather than an empty box.
+    in property <[TypeGroupRow]> type-group-rows;
+    in property <[string]> type-group-kind-options;
+    in-out property <int> type-group-add-kind: 0;
+    in-out property <string> type-group-add-ext: "";
+    in property <bool> type-group-full;
+    in-out property <bool> type-group-add-exists: false;
+    callback type-group-add();
+    callback type-group-remove(int /*index*/);
+    callback type-group-move(int /*index*/, int /*delta*/);
+    callback type-group-clear();
     // Sub-tab of the "Open with" tab: 0 = Favnyr commands,
     // 1 = detected Windows entries (shell extensions).
     in-out property <int> ow-subtab: 0;
@@ -15178,6 +15217,24 @@ export component MainWindow inherits Window {
                         }
                         st-tab-touch := TouchArea { clicked => { root.settings-tab = 3; } }
                     }
+                    // "Type group order" tab --
+                    Rectangle {
+                        height: 30px;
+                        width: tg-tab-txt.preferred-width + 26px;
+                        border-radius: 6px;
+                        background: root.settings-tab == 4 ? Theme.accent-background.with-alpha(0.14)
+                            : (tg-tab-touch.has-hover ? Theme.alternate-background : transparent);
+                        tg-tab-txt := Text {
+                            text: Strings.settings-tab-type-groups;
+                            x: (parent.width - self.width) / 2;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            font-size: 12.5px;
+                            font-weight: root.settings-tab == 4 ? 700 : 500;
+                            color: root.settings-tab == 4 ? Theme.accent-background : Theme.foreground.with-alpha(0.75);
+                        }
+                        tg-tab-touch := TouchArea { clicked => { root.settings-tab = 4; } }
+                    }
                     Rectangle { horizontal-stretch: 1; }
                 }
                 Rectangle { height: 1px; background: Theme.border; }
@@ -16725,6 +16782,221 @@ export component MainWindow inherits Window {
                         }
 
                         // End spring, so the cards keep their natural height.
+                        Rectangle { vertical-stretch: 1; }
+                    }
+                }
+
+                // Scrollable content — TYPE GROUP ORDER tab
+                if root.settings-tab == 4 : ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: start;
+                        padding: 20px;
+                        spacing: 12px;
+
+                        Text {
+                            text: Strings.settings-tab-type-groups;
+                            font-size: 15px;
+                            font-weight: 700;
+                            color: Theme.foreground;
+                        }
+                        Text {
+                            text: Strings.type-group-hint;
+                            font-size: 11.5px;
+                            color: Theme.foreground.with-alpha(0.7);
+                            wrap: word-wrap;
+                            // Without this the wrapped text reports its UNWRAPPED
+                            // width as its minimum, which pushes the whole page
+                            // wider than the dialog and puts a horizontal
+                            // scrollbar under every row.
+                            min-width: 0px;
+                        }
+
+                        // The list itself. One row per group, top to bottom, with
+                        // its position, the up/down buttons and remove.
+                        if root.type-group-rows.length == 0 : Text {
+                            text: Strings.type-group-empty;
+                            font-size: 12px;
+                            color: Theme.foreground.with-alpha(0.55);
+                            wrap: word-wrap;
+                        }
+                        for tgrow[idx] in root.type-group-rows : Rectangle {
+                            height: 34px;
+                            border-radius: 5px;
+                            background: Theme.surface;
+                            border-width: 1px;
+                            border-color: Theme.border;
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 6px;
+                                spacing: 8px;
+
+                                Text {
+                                    text: tgrow.number;
+                                    width: 22px;
+                                    font-size: 12px;
+                                    color: Theme.foreground.with-alpha(0.55);
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: tgrow.label;
+                                    font-size: 12.5px;
+                                    color: Theme.foreground;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    // A long bundle (`doc, docx, docm, …`) must
+                                    // elide rather than widen the row.
+                                    min-width: 0px;
+                                }
+                                // Up / down / remove. Glyphs rather than words: they
+                                // need no translation and stay narrow at any font.
+                                // Each sits in its own box because a layout assigns
+                                // `x` itself, so the glyph is centred inside a
+                                // container instead of over the TouchArea.
+                                tg-up := Rectangle {
+                                    width: 26px;
+                                    height: parent.height;
+                                    tg-up-touch := TouchArea {
+                                        enabled: idx > 0;
+                                        mouse-cursor: idx > 0 ? pointer : default;
+                                        clicked => { root.type-group-move(idx, -1); }
+                                    }
+                                    Text {
+                                        text: "↑";
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 14px;
+                                        color: idx > 0
+                                            ? (tg-up-touch.has-hover ? Theme.accent-background : Theme.foreground.with-alpha(0.75))
+                                            : Theme.foreground.with-alpha(0.2);
+                                    }
+                                }
+                                tg-down := Rectangle {
+                                    width: 26px;
+                                    height: parent.height;
+                                    tg-down-touch := TouchArea {
+                                        enabled: idx < root.type-group-rows.length - 1;
+                                        mouse-cursor: idx < root.type-group-rows.length - 1 ? pointer : default;
+                                        clicked => { root.type-group-move(idx, 1); }
+                                    }
+                                    Text {
+                                        text: "↓";
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 14px;
+                                        color: idx < root.type-group-rows.length - 1
+                                            ? (tg-down-touch.has-hover ? Theme.accent-background : Theme.foreground.with-alpha(0.75))
+                                            : Theme.foreground.with-alpha(0.2);
+                                    }
+                                }
+                                tg-del := Rectangle {
+                                    width: 26px;
+                                    height: parent.height;
+                                    tg-del-touch := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.type-group-remove(idx); }
+                                    }
+                                    Text {
+                                        text: "×";
+                                        width: parent.width;
+                                        height: parent.height;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                        font-size: 15px;
+                                        color: tg-del-touch.has-hover ? Tokens.danger : Theme.foreground.with-alpha(0.75);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Two rows, and every control in them can SHRINK. That is
+                        // what keeps the page free of a horizontal scrollbar: a row
+                        // of fixed widths has a hard minimum, and once the dialog is
+                        // narrower than that minimum the whole page scrolls sideways
+                        // — taking the list rows with it.
+                        //
+                        // Row 1: the category dropdown and the extension box, the
+                        // box taking the slack so it ends where the dialog does.
+                        HorizontalLayout {
+                            spacing: 8px;
+                            ComboBox {
+                                width: 130px;
+                                vertical-stretch: 0;
+                                model: root.type-group-kind-options;
+                                current-index <=> root.type-group-add-kind;
+                            }
+                            tg-ext := LineEdit {
+                                horizontal-stretch: 1;
+                                min-width: 0px;
+                                vertical-stretch: 0;
+                                placeholder-text: Strings.type-group-extension;
+                                text <=> root.type-group-add-ext;
+                                edited(t) => { root.type-group-add-ext = t; }
+                                accepted(t) => { root.type-group-add-ext = t; root.type-group-add(); }
+                            }
+                        }
+                        // Row 2: "add" then "clear", packed left.
+                        HorizontalLayout {
+                            spacing: 8px;
+                            tg-add-btn := TouchArea {
+                                width: 70px;
+                                height: 30px;
+                                enabled: !root.type-group-full;
+                                mouse-cursor: root.type-group-full ? default : pointer;
+                                clicked => { root.type-group-add(); }
+                            }
+                            Rectangle {
+                                width: tg-add-btn.width;
+                                height: tg-add-btn.height;
+                                border-radius: 5px;
+                                background: !root.type-group-full && tg-add-btn.has-hover
+                                    ? Theme.accent-background.with-alpha(0.75)
+                                    : Theme.accent-background;
+                                opacity: root.type-group-full ? 0.4 : 1.0;
+                                Text {
+                                    text: Strings.type-group-add;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    font-size: 12px;
+                                    color: Theme.accent-foreground;
+                                }
+                            }
+                            tg-clear-btn := TouchArea {
+                                width: 70px;
+                                height: 30px;
+                                enabled: root.type-group-rows.length > 0;
+                                mouse-cursor: root.type-group-rows.length > 0 ? pointer : default;
+                                clicked => { root.type-group-clear(); }
+                            }
+                            Rectangle {
+                                width: tg-clear-btn.width;
+                                height: tg-clear-btn.height;
+                                border-radius: 5px;
+                                border-width: 1px;
+                                border-color: Theme.border;
+                                background: tg-clear-btn.has-hover ? Theme.alternate-background : transparent;
+                                opacity: root.type-group-rows.length > 0 ? 1.0 : 0.4;
+                                Text {
+                                    text: Strings.type-group-clear;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    font-size: 12px;
+                                    color: Theme.foreground.with-alpha(0.85);
+                                }
+                            }
+                            Rectangle { horizontal-stretch: 1; }
+                        }
+                        if root.type-group-add-exists : Text {
+                            text: Strings.type-group-exists;
+                            font-size: 11.5px;
+                            color: Tokens.warning;
+                        }
                         Rectangle { vertical-stretch: 1; }
                     }
                 }

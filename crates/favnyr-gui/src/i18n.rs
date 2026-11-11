@@ -132,6 +132,24 @@ pub fn apply_strings(window: &MainWindow, lang: Lang) {
     apply_catalog(window, catalog(lang));
 }
 
+/// Short name of a category ("Folder", "Images", …): the settings list and its
+/// add-dropdown both label groups with these.
+pub fn kind_name(lang: Lang, kind: favnyr_core::fs::FileKind) -> String {
+    use favnyr_core::fs::FileKind;
+    let key = match kind {
+        FileKind::Folder => "kind_folder",
+        FileKind::Application => "kind_application",
+        FileKind::Archive => "kind_archive",
+        FileKind::Image => "kind_image",
+        FileKind::Video => "kind_video",
+        FileKind::Audio => "kind_audio",
+        FileKind::Document => "kind_document",
+        FileKind::Config => "kind_config",
+        FileKind::File => "kind_file",
+    };
+    tr(lang, key)
+}
+
 fn apply_catalog(window: &MainWindow, c: &HashMap<String, String>) {
     let strings = window.global::<Strings>();
     let g = |k: &str| -> slint::SharedString { c.get(k).map(|s| s.as_str()).unwrap_or(k).into() };
@@ -257,6 +275,22 @@ fn apply_catalog(window: &MainWindow, c: &HashMap<String, String>) {
     strings.set_settings_gutter_hint(g("settings_gutter_hint"));
     strings.set_settings_gutter_select_all(g("settings_gutter_select_all"));
     strings.set_settings_gutter_go_parent(g("settings_gutter_go_parent"));
+    strings.set_settings_tab_type_groups(g("settings_tab_type_groups"));
+    strings.set_type_group_hint(g("type_group_hint"));
+    strings.set_type_group_empty(g("type_group_empty"));
+    strings.set_type_group_extension(g("type_group_extension"));
+    strings.set_type_group_add(g("type_group_add"));
+    strings.set_type_group_clear(g("type_group_clear"));
+    strings.set_type_group_exists(g("type_group_exists"));
+    strings.set_kind_folder(g("kind_folder"));
+    strings.set_kind_application(g("kind_application"));
+    strings.set_kind_archive(g("kind_archive"));
+    strings.set_kind_image(g("kind_image"));
+    strings.set_kind_video(g("kind_video"));
+    strings.set_kind_audio(g("kind_audio"));
+    strings.set_kind_document(g("kind_document"));
+    strings.set_kind_config(g("kind_config"));
+    strings.set_kind_file(g("kind_file"));
     strings.set_settings_compact_preview_hint(g("settings_compact_preview_hint"));
     strings.set_settings_annotations_title(g("settings_annotations_title"));
     strings.set_settings_annotations_hint(g("settings_annotations_hint"));
@@ -947,6 +981,22 @@ mod tests {
                 "settings_gutter_hint",
                 "settings_gutter_select_all",
                 "settings_gutter_go_parent",
+                "settings_tab_type_groups",
+                "type_group_hint",
+                "type_group_empty",
+                "type_group_extension",
+                "type_group_add",
+                "type_group_clear",
+                "type_group_exists",
+                "kind_folder",
+                "kind_application",
+                "kind_archive",
+                "kind_image",
+                "kind_video",
+                "kind_audio",
+                "kind_document",
+                "kind_config",
+                "kind_file",
                 "settings_letter_layout",
                 "settings_letter_layout_tip",
                 "settings_letter_layout_off",

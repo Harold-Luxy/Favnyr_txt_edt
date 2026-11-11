@@ -68,6 +68,23 @@ impl FileKind {
         self as u8 as i32
     }
 
+    /// Inverse of [`Self::as_i32`], for the round trip through a `FileRow`
+    /// (Slint only carries the number). `None` for a value no kind has.
+    pub fn from_i32(value: i32) -> Option<Self> {
+        Some(match value {
+            0 => Self::Folder,
+            1 => Self::File,
+            2 => Self::Application,
+            3 => Self::Archive,
+            4 => Self::Audio,
+            5 => Self::Document,
+            6 => Self::Image,
+            7 => Self::Video,
+            8 => Self::Config,
+            _ => return None,
+        })
+    }
+
     /// Can a file of this type be a launchable PROGRAM / SCRIPT (with
     /// dropped files as arguments)? Used to filter out false positives from
     /// the Unix executable bit: on a FAT/NTFS/exFAT mount (everything is
@@ -739,14 +756,48 @@ pub fn type_group_rank(kind: FileKind) -> u8 {
 /// mode, folders and files are sorted together by the criterion alone.
 ///
 /// Sort by name: case-insensitive, with digit runs compared as numbers.
+/// Grouping key shared by every sort variant.
+///
+/// It splits the list into blocks the criterion never crosses, and — unlike the
+/// criterion — it is NEVER reversed by the sort direction (folders stay on top
+/// in `FoldersFirst` even when sorting descending). `Mixed` puts everything in
+/// one block.
+///
+/// `ByType` defers to the user's order when they defined one: it already
+/// answers "which group", including the fallback to the built-in categories for
+/// anything they did not name. Every variant goes through this one function so
+/// a primary and a secondary sort can never disagree about the groups.
+fn group_rank_with(
+    group: GroupMode,
+    type_order: &crate::type_groups::TypeGroupOrder,
+) -> impl Fn(&Entry) -> u32 + '_ {
+    move |entry: &Entry| {
+        if group == GroupMode::ByType && !type_order.is_empty() {
+            return type_order.group_of(entry);
+        }
+        u32::from(group.group_rank(entry).unwrap_or(0))
+    }
+}
+
 pub fn sort(entries: &mut [Entry], column: SortColumn, order: SortOrder, group: GroupMode) {
+    sort_with_type_order(entries, column, order, group, &crate::type_groups::TypeGroupOrder::default())
+}
+
+/// [`sort`], with a user-defined group order for [`GroupMode::ByType`].
+///
+/// The order replaces the built-in type ranks entirely while it is non-empty
+/// (see [`crate::type_groups`]); every other mode ignores it, so a configured
+/// order never disturbs "folders first" or "mixed".
+pub fn sort_with_type_order(
+    entries: &mut [Entry],
+    column: SortColumn,
+    order: SortOrder,
+    group: GroupMode,
+    type_order: &crate::type_groups::TypeGroupOrder,
+) {
     use std::cmp::Reverse;
     let asc = matches!(order, SortOrder::Asc);
-    // Grouping rank: it splits the list into blocks the criterion never
-    // crosses, and — unlike the criterion — it is NEVER reversed by the
-    // direction (folders stay on top in FoldersFirst even when sorting
-    // descending). `Mixed` puts everything in one block.
-    let rank = |e: &Entry| group.group_rank(e).unwrap_or(0);
+    let rank = group_rank_with(group, type_order);
     // Name/Ext sort case-insensitively. Lowercasing a name INSIDE a comparison
     // sort re-allocates it on every comparison (~N·log N times); caching the key
     // lowercases each name once per entry instead. Only the criterion is
@@ -901,11 +952,33 @@ pub fn sort_with_secondary(
     secondary: Option<SecondarySort>,
     offset_secs: i64,
 ) {
+    sort_with_secondary_and_type_order(
+        entries,
+        column,
+        order,
+        group,
+        secondary,
+        offset_secs,
+        &crate::type_groups::TypeGroupOrder::default(),
+    )
+}
+
+/// [`sort_with_secondary`], with a user-defined group order for
+/// [`GroupMode::ByType`].
+pub fn sort_with_secondary_and_type_order(
+    entries: &mut [Entry],
+    column: SortColumn,
+    order: SortOrder,
+    group: GroupMode,
+    secondary: Option<SecondarySort>,
+    offset_secs: i64,
+    type_order: &crate::type_groups::TypeGroupOrder,
+) {
     let Some(secondary) = secondary.filter(|s| !s.column.same_field(column)) else {
-        sort(entries, column, order, group);
+        sort_with_type_order(entries, column, order, group, type_order);
         return;
     };
-    let rank = |e: &Entry| group.group_rank(e).unwrap_or(0);
+    let rank = group_rank_with(group, type_order);
     let by_day = secondary.group_dates_by_day
         && matches!(
             column,

@@ -25,6 +25,7 @@ pub mod properties;
 pub mod shortcuts;
 pub(crate) mod store;
 pub mod thumbnail;
+pub mod type_groups;
 pub mod undo;
 #[cfg(windows)]
 pub mod win32;

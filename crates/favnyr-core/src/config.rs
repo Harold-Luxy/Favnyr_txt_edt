@@ -203,6 +203,19 @@ pub struct Config {
     /// What a double-click in the listing's left gutter does.
     #[serde(default)]
     pub gutter_double_click: GutterDoubleClick,
+    /// User-defined group order for "group by type", as `kind:`/`ext:` tokens.
+    ///
+    /// `None` — the key absent from the file — means "never configured", and
+    /// the shipped default applies (see
+    /// [`crate::type_groups::DEFAULT_TOKENS`]).
+    ///
+    /// `Some(empty)` is a REAL choice, not the same thing: it is what the user
+    /// gets after clearing the list to return to the built-in categories. It
+    /// therefore has to round-trip as an explicit `[]`; treating it as absent
+    /// would silently re-apply the default on the next launch and make the
+    /// clear button look broken.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_group_order: Option<Vec<String>>,
     /// Logical width (px) of the sidebar.
     ///
     /// There is deliberately no field for the sidebar's OPEN state: it always
@@ -380,6 +393,7 @@ impl Default for Config {
             window_height: DEFAULT_WINDOW_HEIGHT,
             confirm_permanent_delete: true,
             gutter_double_click: GutterDoubleClick::default(),
+            type_group_order: None,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_section_order: SidebarSection::DEFAULT_ORDER.to_vec(),
             sidebar_shortcut_redirects: std::collections::BTreeMap::new(),
@@ -464,7 +478,27 @@ impl Config {
         self.view_item_spacing = self
             .view_item_spacing
             .clamp(MIN_VIEW_ITEM_SPACING, MAX_VIEW_ITEM_SPACING);
+        // Normalized through the same parser the settings UI writes with, so
+        // hand-edited shorthand (`image`), a leading dot (`ext:.MD`), a stray
+        // duplicate or a 50-item list all settle into the canonical form.
+        // `None` stays `None`: "never configured" must keep following the
+        // shipped default rather than being frozen to today's list.
+        self.type_group_order = self
+            .type_group_order
+            .map(|tokens| crate::type_groups::TypeGroupOrder::from_tokens(&tokens).to_tokens());
         self
+    }
+
+    /// The group order that actually applies.
+    ///
+    /// Never configured → the shipped default; cleared on purpose → empty,
+    /// which means the built-in categories, exactly as before this setting
+    /// existed.
+    pub fn type_group_order(&self) -> crate::type_groups::TypeGroupOrder {
+        match &self.type_group_order {
+            Some(tokens) => crate::type_groups::TypeGroupOrder::from_tokens(tokens),
+            None => crate::type_groups::default_order(),
+        }
     }
 
     pub fn panel_save_policy(&self) -> WorkspaceLoadPolicy {
@@ -502,8 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn gutter_double_click_defaults_to_select_all_and_round_trips() {
-        // An upgraded config has no key at all: the strip must keep doing what
+    fn gutter_double_click_defaults_to_select_all_and_round_trips() {        // An upgraded config has no key at all: the strip must keep doing what
         // it always did rather than silently start navigating.
         let old: Config = toml::from_str("").unwrap();
         assert_eq!(old.gutter_double_click, GutterDoubleClick::SelectAll);

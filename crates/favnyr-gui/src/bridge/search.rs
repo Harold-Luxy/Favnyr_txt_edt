@@ -556,13 +556,14 @@ fn reorder_panel(panel: &mut Panel, config: &Config) {
     let Some(session) = &mut panel.search else {
         return;
     };
-    rfs::sort_with_secondary(
+    rfs::sort_with_secondary_and_type_order(
         &mut session.entries,
         tab.sort.column,
         tab.sort.order,
         tab.group_mode,
         tab.sort.secondary,
         mtime_offset(),
+        &super::current_type_order(),
     );
     let mut rows: Vec<FileRow> = session
         .entries

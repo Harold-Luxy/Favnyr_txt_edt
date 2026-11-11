@@ -35,6 +35,7 @@ use favnyr_core::config::{
     MAX_VIEW_ITEM_SPACING, MAX_VIEW_TEXT_FONT_SIZE, MIN_THUMBNAIL_ZOOM, MIN_VIEW_ITEM_SPACING,
     MIN_VIEW_TEXT_FONT_SIZE, WorkspaceLoadPolicy,
 };
+use favnyr_core::type_groups::{GroupRule, TypeGroupOrder};
 use favnyr_core::favorites::{self, FlatFav};
 use favnyr_core::folder_state::FolderStateStore;
 use favnyr_core::fs as rfs;
@@ -1901,6 +1902,10 @@ pub fn install(window: &MainWindow, state: AppState) {
     window.set_default_thumbnail_zoom(cfg.default_thumbnail_zoom);
     // What a double-click in a listing's left gutter does (settings).
     window.set_gutter_double_click_index(cfg.gutter_double_click.index());
+    // The "group by type" order (settings). Cached globally because the list and
+    // search paths read it without an `AppState` in hand.
+    set_current_type_order(cfg.type_group_order());
+    push_type_group_ui(window, &state);
     window.set_default_item_arrangement_index(i32::from(
         cfg.default_item_arrangement == ItemArrangement::Grid,
     ));
@@ -3214,6 +3219,9 @@ pub fn install(window: &MainWindow, state: AppState) {
             // language behind ("you have to change it twice").
             st.persist_config(|c| c.language = lang);
             apply_language(&w, lang);
+            // The type-group rows are labelled with the category names, so they
+            // follow the language too.
+            push_type_group_ui(&w, &st);
             // Footer, sizes, ages and column labels all depend on the
             // language, and they are baked into every view's rows — not just
             // the active one. Refreshing a single panel left the others
@@ -3410,6 +3418,91 @@ pub fn install(window: &MainWindow, state: AppState) {
             let choice = GutterDoubleClick::from_index(index);
             info!(?choice, "gutter double-click changed");
             st.persist_config(|c| c.gutter_double_click = choice);
+        });
+    }
+    // Settings > "Type group order": add / remove / move / clear. Every edit
+    // writes the order back and re-sorts the open views, so the file list is
+    // never a step behind the settings page.
+    {
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_type_group_add(move || {
+            let Some(w) = weak.upgrade() else { return };
+            let mut tokens = current_order_tokens(&st);
+            if tokens.len() >= favnyr_core::type_groups::MAX_RULES {
+                return;
+            }
+            // A typed extension wins over the dropdown: leaving the box empty is
+            // how the user says "add the category I picked".
+            let typed = w.get_type_group_add_ext().to_string();
+            let candidate = if typed.trim().is_empty() {
+                let index = w.get_type_group_add_kind().max(0) as usize;
+                let Some(kind) = KIND_DROPDOWN.get(index) else {
+                    return;
+                };
+                format!("kind:{}", favnyr_core::type_groups::kind_code(*kind))
+            } else {
+                format!("ext:{typed}")
+            };
+            // Normalized through the same parser the config uses, so `DOC, docx`
+            // becomes `ext:doc,docx` before it is compared or stored.
+            let parsed = TypeGroupOrder::from_tokens(std::slice::from_ref(&candidate));
+            let Some(rule) = parsed.rules().first() else {
+                return; // unparseable: nothing to add
+            };
+            let token = rule.token();
+            if tokens.contains(&token) {
+                w.set_type_group_add_exists(true);
+                return;
+            }
+            tokens.push(token);
+            let order = TypeGroupOrder::from_tokens(&tokens);
+            w.set_type_group_add_ext("".into());
+            w.set_type_group_add_exists(false);
+            apply_type_group_order(&w, &st, &order);
+        });
+    }
+    {
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_type_group_remove(move |index: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let mut tokens = current_order_tokens(&st);
+            let index = index.max(0) as usize;
+            if index >= tokens.len() {
+                return;
+            }
+            tokens.remove(index);
+            let order = TypeGroupOrder::from_tokens(&tokens);
+            apply_type_group_order(&w, &st, &order);
+        });
+    }
+    {
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_type_group_move(move |index: i32, delta: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let mut tokens = current_order_tokens(&st);
+            let index = index.max(0) as usize;
+            let Some(target) = index.checked_add_signed(delta as isize) else {
+                return;
+            };
+            if index >= tokens.len() || target >= tokens.len() {
+                return;
+            }
+            tokens.swap(index, target);
+            let order = TypeGroupOrder::from_tokens(&tokens);
+            apply_type_group_order(&w, &st, &order);
+        });
+    }
+    {
+        let st = state.clone();
+        let weak = window.as_weak();
+        window.on_type_group_clear(move || {
+            let Some(w) = weak.upgrade() else { return };
+            // An EMPTY list means "use the built-in categories". It is stored as
+            // an explicit empty array so a restart keeps it cleared.
+            apply_type_group_order(&w, &st, &TypeGroupOrder::default());
         });
     }
     {
@@ -11805,13 +11898,14 @@ fn initial_populate_async(window: &MainWindow, state: &AppState) {
         for (idx, path, show_hidden, sort, group, manual_order) in jobs {
             let res = match rfs::list_dir_counted(&path, show_hidden || manual_order) {
                 Ok((mut entries, hidden)) => {
-                    rfs::sort_with_secondary(
+                    rfs::sort_with_secondary_and_type_order(
                         &mut entries,
                         sort.column,
                         sort.order,
                         group,
                         sort.secondary,
                         mtime_offset(),
+                        &current_type_order(),
                     );
                     Ok((entries, hidden))
                 }
@@ -12081,13 +12175,14 @@ fn relist_panel(state: &AppState, i: usize) {
     };
     match rfs::list_dir_counted(&path, show_hidden || manual_order) {
         Ok((mut entries, hidden_count)) => {
-            rfs::sort_with_secondary(
+            rfs::sort_with_secondary_and_type_order(
                 &mut entries,
                 sort.column,
                 sort.order,
                 group_mode,
                 sort.secondary,
                 mtime_offset(),
+                &current_type_order(),
             );
             if manual_order {
                 apply_manual_order(state, &path, &mut entries, show_hidden);
@@ -14643,13 +14738,14 @@ fn request_async_panel_listing(
         }
         let result = match listing {
             Ok((mut entries, hidden)) => {
-                rfs::sort_with_secondary(
+                rfs::sort_with_secondary_and_type_order(
                     &mut entries,
                     sort.column,
                     sort.order,
                     group,
                     sort.secondary,
                     mtime_offset(),
+                    &current_type_order(),
                 );
                 if !manual_order {
                     apply_name_filter(&mut entries, &name_filter);
@@ -14935,13 +15031,14 @@ fn refresh_listing_sync(window: &MainWindow, state: &AppState, path: &Path) {
     let grid =
         state.with_tabs(|book| book.tabs[book.active].item_arrangement == ItemArrangement::Grid);
     let zoom = state.with_tabs(|book| book.tabs[book.active].zoom);
-    rfs::sort_with_secondary(
+    rfs::sort_with_secondary_and_type_order(
         &mut entries,
         sort_state.column,
         sort_state.order,
         group_mode,
         sort_state.secondary,
         mtime_offset(),
+        &current_type_order(),
     );
     if manual_order {
         apply_manual_order(state, path, &mut entries, show_hidden);
@@ -17123,6 +17220,44 @@ const GROUP_GAP: f32 = 16.0;
 /// same kind are contiguous: comparing each row's `kind` with the previous one
 /// therefore finds every section boundary without the core having to publish
 /// any grouping metadata.
+/// The user's "group by type" order, cached for the list's hot paths.
+///
+/// It is a GLOBAL preference (one list for the whole application), and it is
+/// read on paths that have no `AppState` in hand: re-laying rows after a zoom
+/// or a spacing change, and the search results pane. Threading it through every
+/// one of those functions would add a parameter to a dozen signatures to carry
+/// a value that never varies; caching it here mirrors how the translation
+/// catalogue is resolved once and read everywhere.
+///
+/// It is replaced wholesale — never mutated — whenever the config changes, so a
+/// reader always sees one consistent order.
+fn type_order_cell() -> &'static std::sync::RwLock<std::sync::Arc<favnyr_core::type_groups::TypeGroupOrder>>
+{
+    static CELL: std::sync::OnceLock<
+        std::sync::RwLock<std::sync::Arc<favnyr_core::type_groups::TypeGroupOrder>>,
+    > = std::sync::OnceLock::new();
+    CELL.get_or_init(|| {
+        std::sync::RwLock::new(std::sync::Arc::new(
+            favnyr_core::type_groups::TypeGroupOrder::default(),
+        ))
+    })
+}
+
+/// The order currently in effect. The `Arc` clone is a refcount bump.
+fn current_type_order() -> std::sync::Arc<favnyr_core::type_groups::TypeGroupOrder> {
+    type_order_cell()
+        .read()
+        .map(|slot| slot.clone())
+        .unwrap_or_default()
+}
+
+/// Installs a new order: at startup, and whenever the setting changes.
+fn set_current_type_order(order: favnyr_core::type_groups::TypeGroupOrder) {
+    if let Ok(mut slot) = type_order_cell().write() {
+        *slot = std::sync::Arc::new(order);
+    }
+}
+
 fn layout_rows(
     rows: &mut [FileRow],
     zoom: i32,
@@ -17130,25 +17265,70 @@ fn layout_rows(
     item_spacing: i32,
     separate_groups: bool,
 ) {
+    // Sections are split by the GROUP a row belongs to — the same order the
+    // sort used, read from the cache above.
+    let order = current_type_order();
+    layout_rows_with_order(
+        rows,
+        zoom,
+        compact_icon_rows,
+        item_spacing,
+        separate_groups,
+        &order,
+    );
+}
+
+/// [`layout_rows`], separating sections by the GROUP a row belongs to.
+///
+/// The built-in `ByType` order splits on `FileKind`, and comparing neighbours by
+/// kind was enough. A user-defined order is finer: `md`, `txt` and `docx` are all
+/// `FileKind::Document`, so a kind comparison would draw a single section where
+/// the user asked for three. The group index the sort used is therefore
+/// recomputed per row from the three facts a row still carries (folder?, kind,
+/// extension) and compared instead — one rule, the same one the sort orders by.
+fn layout_rows_with_order(
+    rows: &mut [FileRow],
+    zoom: i32,
+    compact_icon_rows: bool,
+    item_spacing: i32,
+    separate_groups: bool,
+    type_order: &favnyr_core::type_groups::TypeGroupOrder,
+) {
     let item_spacing = item_spacing.clamp(MIN_VIEW_ITEM_SPACING, MAX_VIEW_ITEM_SPACING) as f32;
     let mut y = 0.0_f32;
     // `None` before the first row: the first section never opens with a gap,
     // which would otherwise push the whole list down for no reason.
-    let mut previous_kind: Option<i32> = None;
+    let mut previous_group: Option<u32> = None;
     for (index, row) in rows.iter_mut().enumerate() {
         row.model_index = index as i32;
-        let starts_section = separate_groups && previous_kind.is_some_and(|k| k != row.kind);
+        let group = group_of_row(row, type_order);
+        let starts_section = separate_groups && previous_group.is_some_and(|g| g != group);
         row.group_start = starts_section;
         if starts_section {
             y += GROUP_GAP;
         }
-        previous_kind = Some(row.kind);
+        previous_group = Some(group);
         row.visual_y = y;
         row.visual_h =
             effective_row_height(row.preview_capable, zoom, compact_icon_rows) + item_spacing;
         row.rendered = false;
         y += row.visual_h;
     }
+}
+
+/// Group index of a rendered row, matching what the sort used to order it.
+///
+/// Without a user-defined order the group is just the kind, which is what the
+/// built-in categories are.
+fn group_of_row(row: &FileRow, type_order: &favnyr_core::type_groups::TypeGroupOrder) -> u32 {
+    if type_order.is_empty() {
+        return row.kind.max(0) as u32;
+    }
+    // A row whose kind no longer maps (should not happen) falls back to `File`,
+    // the same place an unclassifiable entry lands.
+    let kind = favnyr_core::fs::FileKind::from_i32(row.kind)
+        .unwrap_or(favnyr_core::fs::FileKind::File);
+    type_order.group_of_parts(row.is_dir, kind, &row.ext)
 }
 
 fn item_band(row: &FileRow) -> ItemBand {
@@ -18834,7 +19014,67 @@ fn clear_cut_marks<M: Model<Data = FileRow>>(model: &M) {
     }
 }
 
-// ---------- i18n helpers ----------
+/// The nine categories, in the order the "add" dropdown lists them.
+///
+/// Its own list rather than "whatever the enum declares": a `FileKind` value is
+/// persisted in rows and must stay stable, while the dropdown can be reordered
+/// freely — as long as the index the UI sends back is resolved through here.
+const KIND_DROPDOWN: [favnyr_core::fs::FileKind; 9] = [
+    favnyr_core::fs::FileKind::Folder,
+    favnyr_core::fs::FileKind::Application,
+    favnyr_core::fs::FileKind::Archive,
+    favnyr_core::fs::FileKind::Image,
+    favnyr_core::fs::FileKind::Video,
+    favnyr_core::fs::FileKind::Audio,
+    favnyr_core::fs::FileKind::Document,
+    favnyr_core::fs::FileKind::Config,
+    favnyr_core::fs::FileKind::File,
+];
+
+/// Pushes the "Type group order" page: the rows, the dropdown and the button
+/// states. Called at startup, on a language change, and after every edit.
+fn push_type_group_ui(window: &MainWindow, state: &AppState) {
+    let cfg = state.snapshot_config();
+    let lang = cfg.language;
+    let order = cfg.type_group_order();
+    let rows: Vec<crate::TypeGroupRow> = order
+        .rules()
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| crate::TypeGroupRow {
+            number: index as i32 + 1,
+            label: match rule {
+                GroupRule::Kind(kind) => i18n::kind_name(lang, *kind).into(),
+                GroupRule::Exts(exts) => exts.join(", ").into(),
+            },
+        })
+        .collect();
+    window.set_type_group_rows(ModelRc::new(VecModel::from(rows)));
+    window.set_type_group_kind_options(ModelRc::new(VecModel::from(
+        KIND_DROPDOWN
+            .iter()
+            .map(|kind| SharedString::from(i18n::kind_name(lang, *kind)))
+            .collect::<Vec<_>>(),
+    )));
+    window.set_type_group_full(order.len() >= favnyr_core::type_groups::MAX_RULES);
+}
+
+/// Stores the order and makes the open views reflect it.
+///
+/// `Some(...)` even when empty: clearing the list is a decision that has to
+/// survive a restart, so it is written as an explicit `[]` rather than dropped.
+fn apply_type_group_order(window: &MainWindow, state: &AppState, order: &TypeGroupOrder) {
+    let tokens = order.to_tokens();
+    state.persist_config(|c| c.type_group_order = Some(tokens));
+    set_current_type_order(order.clone());
+    push_type_group_ui(window, state);
+    crate::bridge::refresh_all_panels(window, state);
+}
+
+/// The list as it stands, edits applied to a copy of the effective order.
+fn current_order_tokens(state: &AppState) -> Vec<String> {
+    state.snapshot_config().type_group_order().to_tokens()
+}
 
 fn apply_language(window: &MainWindow, lang: Lang) {
     i18n::apply_strings(window, lang);
@@ -20694,13 +20934,14 @@ mod tests {
             },
         ];
         // Sorted exactly where `refresh_listing` sorts, before the rows exist.
-        rfs::sort_with_secondary(
+        rfs::sort_with_secondary_and_type_order(
             &mut entries,
             SortColumn::Name,
             SortOrder::Asc,
             GroupMode::ByType,
             None,
             mtime_offset(),
+            &current_type_order(),
         );
         let rows = entries_to_rows(
             &entries,
@@ -21791,6 +22032,93 @@ mod tests {
         // And clicking a different, unselected row is a plain new selection.
         let (_, was_alone) = selection_set_only(&model, 4);
         assert!(!was_alone);
+    }
+
+    /// md, txt and docx are all `FileKind::Document`. Under the built-in order
+    /// they are one section; a user-defined order that names them separately
+    /// must draw a boundary between them, which comparing `kind` could never do.
+    #[test]
+    fn a_defined_group_order_splits_rows_that_share_one_kind() {
+        use favnyr_core::type_groups::TypeGroupOrder;
+        let order = TypeGroupOrder::from_tokens(
+            &["kind:folder", "ext:md", "ext:txt", "ext:docx"]
+                .iter()
+                .map(|token| (*token).to_string())
+                .collect::<Vec<_>>(),
+        );
+        let document = favnyr_core::fs::FileKind::Document.as_i32();
+        let mut rows = vec![
+            FileRow {
+                kind: favnyr_core::fs::FileKind::Folder.as_i32(),
+                is_dir: true,
+                ..Default::default()
+            },
+            FileRow {
+                kind: document,
+                ext: "md".into(),
+                ..Default::default()
+            },
+            FileRow {
+                kind: document,
+                ext: "txt".into(),
+                ..Default::default()
+            },
+            FileRow {
+                kind: document,
+                ext: "docx".into(),
+                ..Default::default()
+            },
+            // Unknown to the order: the built-in "document" fallback, which is a
+            // different group again.
+            FileRow {
+                kind: document,
+                ext: "rtf".into(),
+                ..Default::default()
+            },
+        ];
+        layout_rows_with_order(&mut rows, 1, false, 4, true, &order);
+        assert!(!rows[0].group_start, "the list never opens with a gap");
+        assert!(rows[1].group_start, "folder → md");
+        assert!(rows[2].group_start, "md → txt, same kind, different group");
+        assert!(rows[3].group_start, "txt → docx, same kind, different group");
+        assert!(
+            rows[4].group_start,
+            "docx → rtf, which falls back to the document category"
+        );
+    }
+
+    /// With no user-defined order the boundary is still "the kind changed", so
+    /// the built-in categories look exactly as they always did.
+    #[test]
+    fn the_built_in_order_still_splits_only_where_the_kind_changes() {
+        let document = favnyr_core::fs::FileKind::Document.as_i32();
+        let mut rows = vec![
+            FileRow {
+                kind: document,
+                ext: "md".into(),
+                ..Default::default()
+            },
+            FileRow {
+                kind: document,
+                ext: "txt".into(),
+                ..Default::default()
+            },
+            FileRow {
+                kind: favnyr_core::fs::FileKind::Image.as_i32(),
+                ext: "png".into(),
+                ..Default::default()
+            },
+        ];
+        layout_rows_with_order(
+            &mut rows,
+            1,
+            false,
+            4,
+            true,
+            &favnyr_core::type_groups::TypeGroupOrder::default(),
+        );
+        assert!(!rows[1].group_start, "same kind, same section");
+        assert!(rows[2].group_start, "document → image");
     }
 
     #[test]
