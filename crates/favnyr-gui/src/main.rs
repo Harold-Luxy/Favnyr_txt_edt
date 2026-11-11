@@ -397,6 +397,26 @@ fn install_console_ctrl_handler(window: &MainWindow) {
 
 fn main() -> Result<()> {
     let t_start = std::time::Instant::now();
+    // Render with Slint's SOFTWARE rasteriser unless the user asked for
+    // something else.
+    //
+    // The default (femtovg over OpenGL) is only faster when the GL driver is
+    // real. On a machine where GL is emulated — a VM, a remote session, a box
+    // without usable acceleration — every frame is rasterised on the CPU through
+    // a GL shim, which is both slower than the software path and hungry enough
+    // across cores to starve audio playback while a window is being resized.
+    // Measured here: dragging was tolerable, resizing the corners stalled the
+    // whole machine, and forcing this backend fixed it outright.
+    //
+    // `SLINT_BACKEND` is read by Slint when the window is created, i.e. later in
+    // this function, so setting it here is the documented way to choose. A value
+    // already in the environment wins: that keeps the switch, and any future
+    // diagnostic, available without rebuilding.
+    if std::env::var_os("SLINT_BACKEND").is_none() {
+        // SAFETY: single-threaded, before Slint (or any other code) starts
+        // threads or reads the environment.
+        unsafe { std::env::set_var("SLINT_BACKEND", "winit-software") };
+    }
     logging::init();
     paths::ensure_dirs().context("creating XDG directories")?;
 

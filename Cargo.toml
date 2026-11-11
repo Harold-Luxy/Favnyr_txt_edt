@@ -13,7 +13,20 @@ repository   = "https://github.com/GlitchAwakened/Favnyr"
 # Keep the runtime and compiler on the same tested Slint release. The UI uses
 # dynamic GridLayout rows introduced after 1.13, so silently selecting an older
 # MSRV-compatible release would fail in the build script.
-slint              = "=1.18.1"
+#
+# `accessibility` is deliberately LEFT OUT: it is one of Slint's defaults, and
+# the AccessKit tree it republishes on every relayout is a candidate cause of
+# the window-resize lag (the whole UI is rebuilt per size change, and the tree
+# is pushed synchronously on the UI thread). Listed explicitly, minus that one,
+# so the comparison against the default build isolates exactly this flag.
+slint              = { version = "=1.18.1", default-features = false, features = [
+    "std",
+    "backend-default",
+    "renderer-femtovg",
+    "renderer-software",
+    "compat-1-2",
+    "system-tray",
+] }
 slint-build        = "=1.18.1"
 serde              = { version = "1", features = ["derive"] }
 toml               = "0.9"
