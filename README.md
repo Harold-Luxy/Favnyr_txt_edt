@@ -1,4 +1,14 @@
+<a name="top"></a>
+
 # Favnyr_txt_edt
+
+**中文** ｜ [English](#english)
+
+---
+
+<a name="chinese"></a>
+
+## 简介
 
 基于 [Favnyr v0.3.6](https://github.com/GlitchAwakened/Favnyr) 的定制版本 —— 一个 Rust + Slint 写的
 Windows 便携文件浏览器。在保留原版全部功能的基础上，主要补了**文本编辑、路径导航、分组自定义**这几块。
@@ -6,8 +16,6 @@ Windows 便携文件浏览器。在保留原版全部功能的基础上，主要
 Windows x86_64 单文件绿色版，无需安装、无需管理员权限、不联网。
 
 **下载**：[最新版本](https://github.com/Harold-Luxy/Favnyr_txt_edt/releases/latest)（`favnyr.exe`，双击即用）
-
----
 
 ## 相对原版新增的功能
 
@@ -110,8 +118,6 @@ Windows x86_64 单文件绿色版，无需安装、无需管理员权限、不�
 
 全部动作都可以在 **设置 → 快捷键** 中重新绑定或清除。
 
----
-
 ## 与原版的区别
 
 - **只增不减**：原版的所有功能（多标签、分屏、工作区、收藏夹、虚拟滚动、缩略图、压缩包、属性面板等）全部保留，
@@ -126,3 +132,155 @@ Windows x86_64 单文件绿色版，无需安装、无需管理员权限、不�
 GNU General Public License v3.0 or later（与上游一致）。
 
 本构建为自行编译的非官方版本，与上游项目无官方关联。
+
+[↑ 回到顶部](#top) ｜ [English](#english)
+
+---
+
+<a name="english"></a>
+
+## Introduction
+
+A customized build of [Favnyr v0.3.6](https://github.com/GlitchAwakened/Favnyr) — a portable
+Windows file browser written in Rust + Slint. Everything the original does is still here; this
+build mainly adds **text editing, path navigation, and a configurable group order**.
+
+Windows x86_64, single portable executable: no installer, no admin rights, no network access.
+
+**Download**: [latest release](https://github.com/Harold-Luxy/Favnyr_txt_edt/releases/latest)
+(`favnyr.exe`, run it directly).
+
+## What this build adds to upstream
+
+None of the following exists in **Favnyr v0.3.6**; each one is this fork's own work. No upstream
+feature was removed or renamed.
+
+### 1. Text editor view
+
+Right-click a `.txt` / `.md` file → **"Open in editor view"**, and edit it right there instead of
+handing it to an external editor. (My favourite way to keep a memo.)
+
+<img width="2564" height="1503" alt="editor" src="https://github.com/user-attachments/assets/a7d92b83-778f-4311-8689-b3d1127418cc" />
+
+- Title bar: file name, full path, dirty marker, save, move, close
+- Saving: `Ctrl+S`, the save button, on losing focus, and when the view closes
+- Writes go through "temporary file + rename", so an interruption never corrupts the original
+- Files over 1 MB are refused; the same file never opens twice
+- Long lines soft-wrap, and **the wrap is never written back as a newline** — the file keeps its
+  original single-line content
+- Opening and closing both **replace in place**: opening from a folder view turns that view into the
+  editor; closing turns it back into the listing of the file's folder. Position, size and layout are
+  unchanged, and no duplicate side-by-side view appears
+- Views and their content come back after a restart; a deleted file shows "file not found" with its
+  full path
+
+<div align="center">
+  <img width="2560" height="1504" alt="editor-2" src="https://github.com/user-attachments/assets/affbd17b-70fa-4344-8e03-6361f1dfac0e" />
+  <img width="2560" height="1504" alt="editor-3" src="https://github.com/user-attachments/assets/10c6ec55-b96c-41b2-b2f0-d4b357f9c313" />
+</div>
+
+Built on Slint's own `TextEdit` component, entirely in the application layer: no native window
+embedding and no extra process.
+
+### 2. Group by type, in an order you choose
+
+The list can group entries by type (folders / applications / archives / images / videos / audio /
+documents / configuration / unclassified), with 16 px of space and a hairline at each section start.
+
+<img width="450" height="438" alt="sort by type" src="https://github.com/user-attachments/assets/c4f29617-d8af-4446-9154-5ec87622a028" />
+
+The order itself is yours to set: **Settings → Type group order** lists the sections top to bottom,
+and you can add, delete, move a row up or down, or clear the list.
+
+- A rule may name a whole category (`Folder`, `Images`) or one extension (`md`, `pdf`)
+- One rule can bundle several extensions — `doc,docx` — so "Word documents" is **one** section
+  instead of two halves with a separator between them
+- Types you leave out keep the built-in category order and sort below the list
+- The shipped default follows everyday use: folder → md → pdf → txt → Excel → Word → PPT →
+  images → archives → exe
+- "Clear" returns to the built-in order, and the cleared state is remembered across restarts
+- Only active while the view is grouping by type; the other grouping modes are untouched
+
+### 3. Path sidebar
+
+A new sidebar column shows where the active view sits: the ancestor chain from the drive root, the
+current folder, its subfolders, and its siblings.
+
+```
+┃ 💾 C:\
+┃ 📁 Users
+┃ 📁 xinyun.lu
+● 📁 Documents        ← current
+    📁 projects        ← subfolders
+  📁 Downloads         ← siblings
+```
+
+Click to navigate, double-click to open on the other side. Only drives and folders are listed, never
+hidden ones; a network path shows the trail without reading the share (which would block the UI).
+
+### 4. Drag onto a folder = move
+
+| Gesture | Action |
+|---|---|
+| Plain left-drag onto a folder | **Move** |
+| `Ctrl` + drag | **Copy** |
+| `Ctrl+Shift` + drag | The "Move / Copy / Link" menu (the only route to Link) |
+
+The pill next to the cursor says which one will happen before you let go. Favnyr's internal drags and
+drops coming from Explorer share the same rule.
+
+### 5. Undo (`Ctrl+Z`)
+
+Takes back the last file operation, 20 steps deep, one press per step.
+
+| Operation | Undone by |
+|---|---|
+| Rename | Renaming back |
+| Move (cut / drag / across views) | Moving back |
+| Copy | Deleting the copy (it goes to the Recycle Bin) |
+| Delete to the Recycle Bin | Restoring from the Recycle Bin |
+| New file / folder | Deleting it |
+
+Two deliberate refusals: a **permanent delete** (network share, `Shift+Delete`) is never recorded,
+because nothing could bring it back; a copy you have since **edited** is left alone, and a move whose
+original path is now **taken** is skipped rather than overwritten. While the text editor has focus
+`Ctrl+Z` does nothing — it will not delete a file from under a half-written note.
+
+### 6. Double-click in the left gutter: configurable
+
+That narrow strip left of the file names belongs to no entry, so its double-click can mean what you
+want. **Settings → General → Double-click in the left gutter**:
+
+- **Select all** (default, as before)
+- **Go up one level** — same path as `Alt+↑`: it records history and selects the folder you just
+  left; at a drive root nothing happens
+
+### 7. Shortcuts
+
+| Action | Default |
+|---|---|
+| Undo | `Ctrl+Z` |
+| Copy path | `Ctrl+Shift+C` |
+| Copy name | `Ctrl+Alt+C` |
+| Show in file manager | `Ctrl+Shift+E` |
+
+Every action can be rebound or unassigned in **Settings → Shortcuts**.
+
+## Differences from upstream
+
+- **Additions only**: every upstream feature (tabs, split views, workspaces, favorites, virtual
+  scrolling, thumbnails, archives, the properties panel…) is still there. This build layers on top —
+  nothing was replaced and no entry point was removed.
+- **Exactly two default behaviours changed**: dragging onto a folder moves instead of asking, and
+  `Ctrl+Z` became a full undo instead of "restore the last deleted item". Both can be put back in
+  Settings or by rebinding.
+
+Per-change detail is in [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+GNU General Public License v3.0 or later, same as upstream.
+
+This is an unofficial build compiled locally; it is not affiliated with the upstream project.
+
+[↑ Back to top](#top) ｜ [中文](#chinese)
