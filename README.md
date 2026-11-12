@@ -1,70 +1,122 @@
 # Favnyr_txt_edt
 
-## What's new?
+基于 [Favnyr v0.3.6](https://github.com/GlitchAwakened/Favnyr) 的定制版本 —— 一个 Rust + Slint 写的
+Windows 便携文件浏览器。在保留原版全部功能的基础上，主要补了**文本编辑、路径导航、分组自定义**这几块。
 
+Windows x86_64 单文件绿色版，无需安装、无需管理员权限、不联网。
 
-### 1. sort by type
-<img width="450" height="438" alt="4" src="https://github.com/user-attachments/assets/c4f29617-d8af-4446-9154-5ec87622a028" />
+**下载**：[最新版本](https://github.com/Harold-Luxy/Favnyr_txt_edt/releases/latest)（`favnyr.exe`，双击即用）
 
-### 2. editor window
-Now you can right click a .txt/md file and open it as a window of Favnyr.
-(My favourite way of editing a memo.)
+---
 
-<img width="2564" height="1503" alt="1" src="https://github.com/user-attachments/assets/a7d92b83-778f-4311-8689-b3d1127418cc" />
-<img width="2560" height="1504" alt="2" src="https://github.com/user-attachments/assets/affbd17b-70fa-4344-8e03-6361f1dfac0e" />
-<img width="2560" height="1504" alt="3" src="https://github.com/user-attachments/assets/10c6ec55-b96c-41b2-b2f0-d4b357f9c313" />
+## 新增功能
 
-### 3. path sidebar
-A tree of where the active view actually is, so a glance tells you the folder
-and everything above it:
+### 1. 文本编辑视图
+
+右键单个 `.txt` / `.md` 文件 → **「在编辑视图中打开」**，直接在该视图里编辑，不再调用外部编辑器。
+（写备忘录最顺手的方式。）
+
+<img width="2564" height="1503" alt="editor" src="https://github.com/user-attachments/assets/a7d92b83-778f-4311-8689-b3d1127418cc" />
+
+- 标题栏：文件名、完整路径、脏标记、保存、移动、关闭
+- 保存：`Ctrl+S`、保存按钮、失焦自动保存、关闭视图时保存
+- 写入采用「临时文件 + 重命名」，中途断电也不会损坏原文件
+- 超过 1 MB 的文件拒绝打开；同一文件不会重复打开
+- 长行自动换行，**只折行不写入换行符**，保存后仍是原来的单行内容
+- 打开和关闭都是**原地替换**：从文件夹视图打开 → 该位置变成编辑器；关闭 → 变回该文件所在文件夹的列表。
+  位置、尺寸、布局不变，不会多出一个并排的重复视图
+- 重启后视图与内容一起恢复；文件已被删除时显示「未找到文件」+ 完整路径
+
+<div align="center">
+  <img width="2560" height="1504" alt="editor-2" src="https://github.com/user-attachments/assets/affbd17b-70fa-4344-8e03-6361f1dfac0e" />
+  <img width="2560" height="1504" alt="editor-3" src="https://github.com/user-attachments/assets/10c6ec55-b96c-41b2-b2f0-d4b357f9c313" />
+</div>
+
+基于 Slint 内置 `TextEdit` 组件，纯应用层实现：不涉及原生窗口嵌入、无额外进程。
+
+### 2. 按类型分组 + 自定义各组顺序
+
+列表可以按文件类型分组（文件夹 / 应用程序 / 压缩包 / 图片 / 视频 / 音频 / 文档 / 配置 / 未知），
+组与组之间有 16px 留白和组首分隔线。
+
+<img width="450" height="438" alt="sort by type" src="https://github.com/user-attachments/assets/c4f29617-d8af-4446-9154-5ec87622a028" />
+
+更重要的是顺序可以自己定：**设置 → 按类型分组排序** 里按自上而下的顺序列出各组，可以添加、删除、上移、下移。
+
+- 既能加大类（`文件夹`、`图片`），也能加具体扩展名（`md`、`pdf`）
+- 一个规则可打包多个扩展名：`doc,docx` —— 于是「Word 文档」是**一组**，而不是被拆成上下两半
+- 未列出的类型按内置大类顺序排在自定义组下方
+- 内置默认按使用频率排：文件夹 → md → pdf → txt → Excel → Word → PPT → 图片 → 压缩包 → exe
+- 「清空」回到内置大类顺序，且清空状态会被记住
+- 仅在分组模式选「按类型」时生效，其它分组方式不受影响
+
+### 3. 路径侧边栏
+
+侧边栏新增一栏，显示当前视图所处的位置：从盘符根开始的祖先链、当前文件夹、它的子文件夹和兄弟文件夹。
 
 ```
-💾 C:\
-📁 Users
-📁 xinyun.lu
-● 📁 Documents        ← current folder
-    📁 projects        ← its subfolders
-  📁 Downloads         ← its siblings
+┃ 💾 C:\
+┃ 📁 Users
+┃ 📁 xinyun.lu
+● 📁 Documents        ← 当前
+    📁 projects        ← 子文件夹
+  📁 Downloads         ← 兄弟
 ```
 
-Click to navigate, double-click to open on the other side. It only reads
-folders, never hidden ones, and network paths show the trail without probing
-the share (so it cannot hang).
+单击导航，双击在右侧分屏打开。只显示驱动器和文件夹，永不显示隐藏项；网络路径只画祖先链、不读目录（避免卡顿）。
 
-### 4. drag to move, Ctrl to copy
-Dragging a file onto a folder now moves it straight away — no "Move / Copy /
-Link" menu in the way. Hold **Ctrl** to copy instead. The little pill next to
-the cursor says which one will happen before you let go.
+### 4. 拖到文件夹上 = 移动
 
-`Ctrl+Shift` still brings the menu up, which is where **Link** lives.
+| 手势 | 动作 |
+|---|---|
+| 单左键拖到文件夹上 | **移动** |
+| `Ctrl` + 拖 | **复制** |
+| `Ctrl+Shift` + 拖 | 弹出「移动 / 复制 / 链接」菜单（链接的唯一入口） |
 
-### 5. undo (`Ctrl+Z`)
-Takes back the last 20 operations: rename, move, copy, a newly created file or
-folder, and a deletion to the Recycle Bin. Press it again to keep going back.
+光标旁的提示胶囊会实时显示将要执行的动作。Favnyr 内部拖拽和从资源管理器拖进来走同一套判定。
 
-Two deliberate refusals:
-- a permanent delete (network share, `Shift+Delete`) is never offered, because
-  nothing could bring it back;
-- a copy you have since edited is left alone rather than deleted, and a move
-  whose old name is now taken is skipped rather than overwritten.
+### 5. 撤销 `Ctrl+Z`
 
-While the text editor has focus `Ctrl+Z` does nothing — it will not delete a
-file from under a half-written note.
+撤销上一步文件操作，保留最近 **20 步**，可连续按逐步回退。
 
-### 6. your own order for the type sections
-Settings > **Type group order** lists the sections "group by type" produces,
-top to bottom, and lets you rearrange them: move a row up or down, delete it,
-or add a category or an extension (`doc,docx` bundles a whole format family
-into one section).
+| 操作 | 撤销结果 |
+|---|---|
+| 重命名 | 改回原名 |
+| 移动（剪切 / 拖拽 / 跨视图） | 移回原处 |
+| 复制 | 副本被删除（进回收站，可再找回） |
+| 删除到回收站 | 从回收站恢复 |
+| 新建文件 / 文件夹 | 被删除 |
 
-Types you leave out keep their usual category order and sort below the list.
-Clearing the list returns to that built-in order, and the cleared state is
-remembered. Nothing changes unless the view is actually grouping by type.
+两处刻意不做：**永久删除**（网络路径、`Shift+Delete`）不进历史；**已被你编辑过的副本**不删、
+**原位已被占用**时跳过而不是覆盖。在文本编辑器里按 `Ctrl+Z` 不会触发文件撤销。
 
-### 7. smaller, tidier binary
-The same 39 MB single portable file, with dead code and duplicated helpers
-removed. No installer, no runtime, no external DLLs.
+### 6. 双击左侧空白条可配置
 
-## License
+列表左侧那条窄边不属于任何条目，所以它的双击含义可以在 **设置 → 常规 → 双击左侧空白条** 里选：
 
-GNU General Public License v3.0 or later.
+- **全选**（默认，与之前一致）
+- **返回上一级** —— 和 `Alt+↑` 同一条路径：进历史、跳转后选中刚离开的文件夹；已在根目录则无事发生
+
+### 7. 快捷键
+
+| 动作 | 默认快捷键 |
+|---|---|
+| 撤销 | `Ctrl+Z` |
+| 复制路径 | `Ctrl+Shift+C` |
+| 复制名称 | `Ctrl+Alt+C` |
+| 在文件管理器中打开 | `Ctrl+Shift+E` |
+
+全部动作都可以在 **设置 → 快捷键** 中重新绑定或清除。
+
+---
+
+## 与原版的区别
+
+原版的所有功能（多标签、分屏、工作区、收藏夹、虚拟滚动、缩略图、压缩包、属性面板等）都保留，
+本定制版是**叠加**而非替换。改动明细见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 许可证
+
+GNU General Public License v3.0 or later（与上游一致）。
+
+本构建为自行编译的非官方版本，与上游项目无官方关联。
