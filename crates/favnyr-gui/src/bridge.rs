@@ -36,6 +36,18 @@ use favnyr_core::config::{
     MIN_VIEW_TEXT_FONT_SIZE, WorkspaceLoadPolicy,
 };
 use favnyr_core::type_groups::{GroupRule, TypeGroupOrder};
+
+/// True while the user is dragging or resizing the window itself.
+///
+/// Windows runs a modal loop for that gesture, and the window has to follow the
+/// pointer on every turn of it. Re-listing, recomputing row geometry and
+/// scheduling thumbnails all cost more than a frame here, which showed up as the
+/// window freezing and then jumping — and, across monitors, as the drag anchor
+/// appearing to move, because the window had fallen several steps behind the
+/// pointer by the time it caught up. The work is skipped while this is set and
+/// paid once on release.
+static INTERACTIVE_MOVE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 use favnyr_core::favorites::{self, FlatFav};
 use favnyr_core::folder_state::FolderStateStore;
 use favnyr_core::fs as rfs;
@@ -2200,6 +2212,27 @@ pub fn install(window: &MainWindow, state: AppState) {
                             crate::winddrag::rebind_drop_target(hwnd);
                         }
                     }
+                    // Interactive window move/resize. While it lasts, the list's
+                    // per-change work (geometry, visible window, thumbnail
+                    // scheduling) is skipped: Windows is running a modal loop in
+                    // which the window must follow the pointer every frame, and
+                    // a full relayout of this UI does not fit in a frame. The
+                    // backlog is settled once, on release.
+                    crate::winmsg::Incoming::WindowInteraction { started, resizing } => {
+                        INTERACTIVE_MOVE.store(started, Ordering::Relaxed);
+                        // A frosted pane would need a backdrop blur Slint does not
+                        // have; a plain sheet of the window background says the
+                        // same thing — the content is deliberately not being laid
+                        // out until the drag ends (see `visible` on the panels).
+                        w.set_resize_scrim(started && resizing);
+                        if !started {
+                            w.invoke_refresh_all();
+                        }
+                    }
+                    // Restored from minimised, or rescaled by the shell: the
+                    // software rasteriser can leave regions unpainted, so ask for
+                    // the whole window again.
+                    crate::winmsg::Incoming::Repaint => w.window().request_redraw(),
                 }
             });
             if !ipc_ready {
@@ -6895,6 +6928,12 @@ pub fn install(window: &MainWindow, state: AppState) {
         window.on_panel_viewport_changed(
             move |panel: i32, top: f32, height: f32, grid: crate::ItemGrid| {
                 if panel < 0 {
+                    return top;
+                }
+                // Mid-drag on the window itself: keep the scroll position and do
+                // nothing else. The backlog (geometry, visible window, thumbnail
+                // priorities) is settled by the refresh issued on release.
+                if INTERACTIVE_MOVE.load(Ordering::Relaxed) {
                     return top;
                 }
                 let layout = grid_from_ui(grid);

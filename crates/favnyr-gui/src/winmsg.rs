@@ -72,6 +72,35 @@ mod imp {
     unsafe extern "system" {
         fn GetCurrentThreadId() -> u32;
     }
+    // Geometry telemetry for the cross-monitor drag: a window that grows (and is
+    // animated into its new rect, which reads as a snap) when it crosses screens
+    // is either a correct DPI rescale or a scale applied twice, and only the
+    // numbers tell them apart.
+    #[repr(C)]
+    #[derive(Default)]
+    struct LogRect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetWindowPos(
+            hwnd: Hwnd,
+            insert_after: isize,
+            x: i32,
+            y: i32,
+            cx: i32,
+            cy: i32,
+            flags: u32,
+        ) -> i32;
+    }
+    /// `SetWindowPos` flags: keep the z-order and activation untouched, and let
+    /// the caller's frame stay put.
+    const SWP_NOZORDER: u32 = 0x0004;
+    const SWP_NOACTIVATE: u32 = 0x0010;
+    const SWP_NOOWNERZORDER: u32 = 0x0200;
     // Window subclassing (Common Controls v6, system DLL).
     #[link(name = "comctl32")]
     unsafe extern "system" {
@@ -87,6 +116,27 @@ mod imp {
     const WM_COPYDATA: u32 = 0x004A;
     const WM_DEVICECHANGE: u32 = 0x0219;
     const WM_POWERBROADCAST: u32 = 0x0218;
+    /// The user grabbed the title bar or a resize border, and let go of it.
+    /// Windows runs a modal loop in between, which is the only window in which
+    /// the window can follow the pointer.
+    const WM_ENTERSIZEMOVE: u32 = 0x0231;
+    const WM_EXITSIZEMOVE: u32 = 0x0232;
+    /// Sent before a non-client drag begins; `wparam` is the hit-test code, which
+    /// says whether the user grabbed the caption (a MOVE) or a border (a RESIZE).
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    const HTCAPTION: usize = 2;
+    const WM_DPICHANGED: u32 = 0x02E0;
+    const WM_SIZE: u32 = 0x0005;
+    const SIZE_RESTORED: usize = 0;
+    const SIZE_MAXIMIZED: usize = 2;
+    /// Activation change: used only as a safety net. Losing/gaining activation
+    /// cannot happen in the middle of a drag, so seeing it is proof that a
+    /// `WM_EXITSIZEMOVE` was missed and the interaction state must be cleared.
+    const WM_ACTIVATE: u32 = 0x0006;
+    /// End of any left click, and the window taking keyboard focus. Both are
+    /// gesture boundaries, and both are used only to ask for a full repaint.
+    const WM_LBUTTONUP: u32 = 0x0202;
+    const WM_SETFOCUS: u32 = 0x0007;
     /// Resume subtypes of `WM_POWERBROADCAST`. Both are broadcast to every
     /// top-level window with no prior registration. Two of them because they
     /// describe different ways back: `RESUMESUSPEND` follows a resume the user
@@ -137,6 +187,9 @@ mod imp {
     // across all Favnyr instances for a given string). Resolved at init.
     static WM_HOVER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     static WM_HOVER_END: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    /// Hit code of the last non-client press, so `WM_ENTERSIZEMOVE` can tell a
+    /// caption drag (move) from a border drag (resize).
+    static LAST_HIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     /// Incoming message: from another Favnyr instance, or from the system.
     pub enum Incoming {
@@ -154,6 +207,12 @@ mod imp {
         /// the drop target survives an ordinary session, but a resume is where
         /// it has been observed to stop being consulted.
         PowerResumed,
+        /// The user started (`true`) or finished (`false`) dragging or resizing
+        /// the window. Sent by Windows. `resizing` distinguishes a border drag
+        /// from a caption drag.
+        WindowInteraction { started: bool, resizing: bool },
+        /// Repaint the whole window (restored from minimised, or rescaled).
+        Repaint,
     }
 
     /// Handler for incoming messages (on the UI thread).
@@ -233,6 +292,89 @@ mod imp {
                 && (wparam == PBT_APMRESUMESUSPEND || wparam == PBT_APMRESUMEAUTOMATIC)
             {
                 dispatch(Incoming::PowerResumed);
+                return DefSubclassProc(hwnd, msg, wparam, lparam);
+            }
+            // Start/end of an interactive window move or resize. Observed,
+            // never consumed: the modal loop and the backend both need these.
+            // The hit code seen at press time is what separates the two: a drag
+            // on the caption must not raise the resize scrim, only a drag on a
+            // border should.
+            if msg == WM_NCLBUTTONDOWN {
+                LAST_HIT.store(wparam, Ordering::Relaxed);
+                return DefSubclassProc(hwnd, msg, wparam, lparam);
+            }
+            if msg == WM_ENTERSIZEMOVE || msg == WM_EXITSIZEMOVE {
+                let entering = msg == WM_ENTERSIZEMOVE;
+                let resizing = entering && LAST_HIT.load(Ordering::Relaxed) != HTCAPTION;
+                dispatch(Incoming::WindowInteraction {
+                    started: entering,
+                    resizing,
+                });
+                // Every drag or resize ends here: one full repaint, so the
+                // software rasteriser cannot leave a region showing the window's
+                // initial black.
+                if !entering {
+                    dispatch(Incoming::Repaint);
+                }
+                return DefSubclassProc(hwnd, msg, wparam, lparam);
+            }
+            // Safety net for a lost WM_EXITSIZEMOVE: an activation change cannot
+            // happen mid-drag, so it means the interaction state is stale and the
+            // window must go back to normal (otherwise the panels stay hidden and
+            // the list stops updating until the next drag ends).
+            if msg == WM_ACTIVATE {
+                dispatch(Incoming::WindowInteraction {
+                    started: false,
+                    resizing: false,
+                });
+                // Back from the background or from another app: repaint, for the
+                // same reason as the other boundaries.
+                dispatch(Incoming::Repaint);
+                return DefSubclassProc(hwnd, msg, wparam, lparam);
+            }
+            // Gesture boundaries that are not a window drag: the end of any left
+            // click, and the window taking focus. Both are cheap to observe and
+            // each one already costs a repaint of whatever the click changed, so
+            // asking for the whole window there closes the last gaps the
+            // software rasteriser was leaving black.
+            if msg == WM_LBUTTONUP || msg == WM_SETFOCUS {
+                dispatch(Incoming::Repaint);
+                return DefSubclassProc(hwnd, msg, wparam, lparam);
+            }
+            // The window became visible again, or changed size through the
+            // shell rather than a drag: ask for a full repaint, since the
+            // software rasteriser's damage tracking has been seen to leave
+            // regions unpainted after either.
+            if msg == WM_SIZE && (wparam == SIZE_RESTORED || wparam == SIZE_MAXIMIZED) {
+                dispatch(Incoming::Repaint);
+                return DefSubclassProc(hwnd, msg, wparam, lparam);
+            }
+            // A cross-monitor drag lands here: `wparam` carries the new DPI (low
+            // word) and `lparam` the rectangle Windows suggests. The rect is
+            // logged as given and not applied — the backend owns that.
+            if msg == WM_DPICHANGED {
+                let suggested = &*(lparam as *const LogRect);
+                // alone was measured NOT to do it: after crossing from a 200%
+                // monitor to a 150% one the window kept its 2039 px physical
+                // width at the new DPI, i.e. grew by a third on screen, and only
+                // came back to the suggested 1529 px when the drag ended — which
+                // is exactly the "it resizes itself mid-drag, with an animation"
+                // that was reported. Kept narrow (z-order and activation
+                // untouched) so it cannot steal focus from the drag.
+                if suggested.right > suggested.left && suggested.bottom > suggested.top {
+                    let _applied = {
+                        SetWindowPos(
+                            hwnd,
+                            0,
+                            suggested.left,
+                            suggested.top,
+                            suggested.right - suggested.left,
+                            suggested.bottom - suggested.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
+                        )
+                    };
+
+                }
                 return DefSubclassProc(hwnd, msg, wparam, lparam);
             }
             if msg == WM_COPYDATA {
@@ -420,6 +562,9 @@ mod imp {
         HoverEnd,
         DevicesChanged,
         PowerResumed,
+        WindowInteraction { started: bool, resizing: bool },
+        /// Repaint the whole window (restored from minimised, or rescaled).
+        Repaint,
     }
     /// No-op outside Windows (`true` = don't retry). Cross-instance IPC is
     /// Windows-only for now (Linux: window detection + IPC still to be defined).

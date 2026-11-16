@@ -10942,6 +10942,10 @@ export component MainWindow inherits Window {
     // Active tab of the Settings panel: 0 = General, 1 = Shortcuts (key
     // management has its own page so it no longer weighs down "General").
     in-out property <int> settings-tab: 0;
+    /// True while the user is dragging a window BORDER. The content underneath
+    /// is not repainted during that gesture (see `INTERACTIVE_MOVE`), so a sheet
+    /// is drawn over it rather than letting the stale layout show through.
+    in-out property <bool> resize-scrim: false;
     // Settings > "Type group order": the rows, the add controls and the state
     // the buttons need. The list is the effective one, so an untouched config
     // shows the shipped default rather than an empty box.
@@ -12418,6 +12422,13 @@ export component MainWindow inherits Window {
                     drag-abs-y: root.folder-open-drag-active ? root.file-drag-abs-y : root.drag-abs-y;
                     tab-tooltip-enabled: root.tab-tooltip-enabled;
                     gutter-double-click: root.gutter-double-click-index;
+                    // Out of the layout while a window border is being dragged:
+                    // an invisible element is not laid out nor painted, so the
+                    // two things that actually cost during that gesture — the
+                    // row virtualisation and the editor re-wrapping its text at
+                    // every intermediate width — simply stop happening. The
+                    // background sheet is all that is left to draw.
+                    visible: !root.resize-scrim;
                     is-drag-source: root.drag-active && idx == root.drag-source-panel;
                     // The panel under the cursor claims the drop target.
                     changed drag-zone => {
@@ -19470,5 +19481,21 @@ export component MainWindow inherits Window {
             }
         }
 
+    }
+
+    // Resize scrim. Drawn LAST so it covers everything, and only while a border
+    // drag is in progress: the list underneath is intentionally frozen, and a
+    // stale layout showing through would look like a bug.
+    if root.resize-scrim : Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        // A plain sheet of the window background — no content, no border, no
+        // hint of what is underneath. The layout below keeps being recomputed
+        // while the border is dragged (Slint re-wraps the editor's text at the
+        // new width), and any trace of that reflow undermines the gesture; this
+        // is the calmest thing to look at while the frame moves.
+        background: Theme.background;
     }
 }
