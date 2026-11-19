@@ -14179,7 +14179,7 @@ export component MainWindow inherits Window {
                         if (!root.fav-name-invalid && t != "") { root.fav-name-confirm(); }
                     }
                 }
-                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 2px; }
                 HorizontalBox {
                     padding: 0px;
                     Rectangle { horizontal-stretch: 1; }
@@ -14265,7 +14265,7 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
-                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 2px; }
                 HorizontalBox {
                     padding: 0px;
                     Rectangle { horizontal-stretch: 1; }
@@ -14338,7 +14338,7 @@ export component MainWindow inherits Window {
                     model: root.fav-container-labels;
                     current-index <=> root.fav-newc-parent-index;
                 }
-                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 2px; }
                 HorizontalBox {
                     padding: 0px;
                     Rectangle { horizontal-stretch: 1; }
@@ -17634,7 +17634,7 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
-                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 2px; }
                 HorizontalBox {
                     padding: 0px;
                     Rectangle { horizontal-stretch: 1; }
@@ -17654,12 +17654,15 @@ export component MainWindow inherits Window {
             }
         }
 
-        if root.rename-popup-open : ModalBackdrop { }
+        // A compact bar pinned near the bottom of the window instead of a centred
+        // modal with a backdrop. Renaming is one small field, and dimming the
+        // whole view for it made it feel heavier than it is; the row it acts on
+        // stays visible, which is the point of the change.
         if root.rename-popup-open : Rectangle {
             x: (parent.width - self.width) / 2;
-            y: (parent.height - self.height) / 2;
-            width: 460px;
-            height: 244px;
+            y: parent.height - self.height - 20px;
+            width: 420px;
+            height: 152px;
             background: Theme.background;
             border-radius: 8px;
             border-width: 1px;
@@ -17748,7 +17751,7 @@ export component MainWindow inherits Window {
                         }
                     }
                 }
-                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 2px; }
                 HorizontalBox {
                     padding: 0px;
                     Rectangle { horizontal-stretch: 1; }
@@ -17905,7 +17908,7 @@ export component MainWindow inherits Window {
                     color: Theme.foreground.with-alpha(0.55);
                     overflow: elide;
                 }
-                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 2px; }
                 HorizontalBox {
                     padding: 0px;
                     Rectangle { horizontal-stretch: 1; }
@@ -18195,7 +18198,7 @@ export component MainWindow inherits Window {
                     wrap: word-wrap;
                     color: Theme.foreground;
                 }
-                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 2px; }
                 HorizontalBox {
                     padding: 0px;
                     Rectangle { horizontal-stretch: 1; }
@@ -18245,7 +18248,7 @@ export component MainWindow inherits Window {
                     wrap: word-wrap;
                     color: Theme.foreground;
                 }
-                Rectangle { vertical-stretch: 1; }
+                Rectangle { height: 2px; }
                 HorizontalBox {
                     padding: 0px;
                     Rectangle { horizontal-stretch: 1; }
