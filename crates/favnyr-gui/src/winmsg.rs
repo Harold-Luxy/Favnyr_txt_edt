@@ -86,8 +86,7 @@ mod imp {
     }
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn SetWindowPos(
-            hwnd: Hwnd,
+        fn SetWindowPos(            hwnd: Hwnd,
             insert_after: isize,
             x: i32,
             y: i32,
@@ -125,6 +124,12 @@ mod imp {
     /// says whether the user grabbed the caption (a MOVE) or a border (a RESIZE).
     const WM_NCLBUTTONDOWN: u32 = 0x00A1;
     const HTCAPTION: usize = 2;
+    /// Hit codes seen at press time for the eight resize borders. A non-client
+    /// press on one of these IS the start of an interactive resize — which is
+    /// what has to be detected here, because `WM_ENTERSIZEMOVE` was measured NOT
+    /// to arrive on this window (the log shows the size stream but never the
+    /// matching enter/exit pair).
+    const RESIZE_HITS: [usize; 8] = [10, 11, 12, 13, 14, 15, 16, 17];
     const WM_DPICHANGED: u32 = 0x02E0;
     const WM_SIZE: u32 = 0x0005;
     const SIZE_RESTORED: usize = 0;
@@ -301,6 +306,15 @@ mod imp {
             // border should.
             if msg == WM_NCLBUTTONDOWN {
                 LAST_HIT.store(wparam, Ordering::Relaxed);
+                // This, not `WM_ENTERSIZEMOVE`, is where an interactive resize
+                // begins in practice: freeze the content machinery for the
+                // duration of the drag.
+                if RESIZE_HITS.contains(&wparam) {
+                    dispatch(Incoming::WindowInteraction {
+                        started: true,
+                        resizing: true,
+                    });
+                }
                 return DefSubclassProc(hwnd, msg, wparam, lparam);
             }
             if msg == WM_ENTERSIZEMOVE || msg == WM_EXITSIZEMOVE {
@@ -338,6 +352,14 @@ mod imp {
             // asking for the whole window there closes the last gaps the
             // software rasteriser was leaving black.
             if msg == WM_LBUTTONUP || msg == WM_SETFOCUS {
+                // Release ends the interactive resize started at the border
+                // press above, and the repaint settles whatever it left behind.
+                if msg == WM_LBUTTONUP {
+                    dispatch(Incoming::WindowInteraction {
+                        started: false,
+                        resizing: false,
+                    });
+                }
                 dispatch(Incoming::Repaint);
                 return DefSubclassProc(hwnd, msg, wparam, lparam);
             }
