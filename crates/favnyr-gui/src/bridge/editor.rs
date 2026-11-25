@@ -108,3 +108,102 @@ mod editor_buffer_shift_tests {
         assert_eq!(buffers.len(), 2);
     }
 }
+
+// ---- Loading, saving and flushing ----
+
+/// Replaces the buffer of panel `idx` with the contents of `file`.
+///
+/// Decoding is LOSSY on purpose: a text file saved in a legacy code page must
+/// still open (readable in ASCII, mangled elsewhere) rather than fail outright,
+/// because the alternative is a view the user cannot reach.
+pub(crate) fn load_editor_buffer(state: &AppState, idx: usize, file: &Path) -> anyhow::Result<()> {
+    let len = std::fs::metadata(file)?.len();
+    if len > MAX_EDITOR_BYTES {
+        return Err(anyhow::anyhow!(
+            "file is {len} bytes, above the {MAX_EDITOR_BYTES} limit"
+        ));
+    }
+    let bytes = std::fs::read(file)?;
+    // A UTF-8 BOM would otherwise show up as a stray character before the first
+    // word, and be written back on save, doubling it every round trip.
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    let text = String::from_utf8_lossy(bytes).into_owned();
+
+    let mut buffers = state.editor_buffers.borrow_mut();
+    buffers.insert(
+        idx,
+        EditorBuffer {
+            saved: text.clone(),
+            text,
+        },
+    );
+    Ok(())
+}
+/// Whether the editor at `idx` has unsaved changes.
+pub(crate) fn editor_is_dirty(state: &AppState, idx: usize) -> bool {
+    state
+        .editor_buffers
+        .borrow()
+        .get(&idx)
+        .is_some_and(EditorBuffer::is_dirty)
+}
+/// Writes the editor at `idx` back to its file, if it differs from disk.
+///
+/// Returns `true` when something was written. A failure is reported to the user
+/// and the buffer is left dirty, so the next save (or the shutdown flush) tries
+/// again instead of silently dropping the edits.
+pub(crate) fn save_editor(state: &AppState, idx: usize) -> bool {
+    let (path, text, dirty) = {
+        let buffers = state.editor_buffers.borrow();
+        let Some(buffer) = buffers.get(&idx) else {
+            return false;
+        };
+        let Some(path) = state
+            .panels
+            .borrow()
+            .get(idx)
+            .and_then(|p| p.editor_file().map(Path::to_path_buf))
+        else {
+            return false;
+        };
+        (path, buffer.text.clone(), buffer.is_dirty())
+    };
+    if !dirty {
+        return false;
+    }
+
+    // Written through a sibling temporary file then renamed: a crash or a full
+    // disk mid-write would otherwise leave a truncated note where the original
+    // used to be, which is the one outcome a note-taking view must not produce.
+    let tmp = path.with_extension("favnyr-tmp");
+    let written = std::fs::write(&tmp, text.as_bytes())
+        .and_then(|()| std::fs::rename(&tmp, &path));
+    if let Err(err) = written {
+        let _ = std::fs::remove_file(&tmp);
+        warn!(error = %err, file = %path.display(), "saving the editor buffer failed");
+        return false;
+    }
+
+    if let Some(buffer) = state.editor_buffers.borrow_mut().get_mut(&idx) {
+        buffer.saved = text;
+    }
+    true
+}
+
+/// Saves every dirty editor view. Called on application shutdown, so edits made
+/// in the last seconds before closing are not lost.
+pub(crate) fn flush_editor_views(state: &AppState) {
+    let dirty: Vec<usize> = {
+        let buffers = state.editor_buffers.borrow();
+        buffers
+            .iter()
+            .filter(|(_, b)| b.is_dirty())
+            .map(|(idx, _)| *idx)
+            .collect()
+    };
+    for idx in dirty {
+        if save_editor(state, idx) {
+            info!(panel = idx, "flushed editor buffer on shutdown");
+        }
+    }
+}
