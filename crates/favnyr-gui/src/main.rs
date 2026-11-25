@@ -397,12 +397,11 @@ fn install_console_ctrl_handler(window: &MainWindow) {
 
 fn main() -> Result<()> {
     let t_start = std::time::Instant::now();
-    // Software rasteriser unless the environment says otherwise. On this machine
-    // the GL driver is emulated, so femtovg rasterises every frame through a
-    // software GL shim: resizing the window then saturates cores and starves
-    // audio. The two problems that made this look unsafe earlier are handled
-    // separately now — the DPI suggested rect is applied on a monitor change, and
-    // a full repaint is requested whenever the window is restored or rescaled.
+    // Software rasteriser by default: on this machine GL is emulated, and
+    // resizing a window through it costs enough to stutter audio. Its one
+    // defect — transparent gaps when the window comes back to the foreground —
+    // is a damage-tracking bug in that backend and is documented as a known
+    // limitation. `SLINT_BACKEND=winit-femtovg` switches to GL without a rebuild.
     if std::env::var_os("SLINT_BACKEND").is_none() {
         // SAFETY: single-threaded, before Slint starts threads or reads the env.
         unsafe { std::env::set_var("SLINT_BACKEND", "winit-software") };

@@ -86,7 +86,12 @@ mod imp {
     }
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn SetWindowPos(            hwnd: Hwnd,
+        // Whole-client-area invalidation: the stronger sibling of the redraw
+        // request, which the software rasteriser may fold into its own damage
+        // tracking and then ignore.
+        fn InvalidateRect(hwnd: Hwnd, rect: *const core::ffi::c_void, erase: i32) -> i32;
+        fn UpdateWindow(hwnd: Hwnd) -> i32;
+        fn SetWindowPos(hwnd: Hwnd,
             insert_after: isize,
             x: i32,
             y: i32,
@@ -218,6 +223,9 @@ mod imp {
         WindowInteraction { started: bool, resizing: bool },
         /// Repaint the whole window (restored from minimised, or rescaled).
         Repaint,
+        /// Recompute the layout, then repaint: the window came back at a size
+        /// its layout may no longer match.
+        Relayout,
     }
 
     /// Handler for incoming messages (on the UI thread).
@@ -343,7 +351,11 @@ mod imp {
                 });
                 // Back from the background or from another app: repaint, for the
                 // same reason as the other boundaries.
-                dispatch(Incoming::Repaint);
+                dispatch(Incoming::Relayout);
+                // Erase and repaint the whole client area NOW, rather than
+                // trusting a coalesced redraw request.
+                InvalidateRect(hwnd, core::ptr::null(), 1);
+                UpdateWindow(hwnd);
                 return DefSubclassProc(hwnd, msg, wparam, lparam);
             }
             // Gesture boundaries that are not a window drag: the end of any left
@@ -368,7 +380,7 @@ mod imp {
             // software rasteriser's damage tracking has been seen to leave
             // regions unpainted after either.
             if msg == WM_SIZE && (wparam == SIZE_RESTORED || wparam == SIZE_MAXIMIZED) {
-                dispatch(Incoming::Repaint);
+                dispatch(Incoming::Relayout);
                 return DefSubclassProc(hwnd, msg, wparam, lparam);
             }
             // A cross-monitor drag lands here: `wparam` carries the new DPI (low
@@ -587,6 +599,9 @@ mod imp {
         WindowInteraction { started: bool, resizing: bool },
         /// Repaint the whole window (restored from minimised, or rescaled).
         Repaint,
+        /// Recompute the layout, then repaint: the window came back at a size
+        /// its layout may no longer match.
+        Relayout,
     }
     /// No-op outside Windows (`true` = don't retry). Cross-instance IPC is
     /// Windows-only for now (Linux: window detection + IPC still to be defined).

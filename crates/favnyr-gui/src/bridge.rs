@@ -2233,6 +2233,58 @@ pub fn install(window: &MainWindow, state: AppState) {
                     // software rasteriser can leave regions unpainted, so ask for
                     // the whole window again.
                     crate::winmsg::Incoming::Repaint => w.window().request_redraw(),
+                    // Restored or brought back to the foreground: repainting
+                    // alone was measured not to be enough. The artifact left
+                    // behind (a column clipped by the window edge, a scrollbar
+                    // drawn outside its panel) is a LAYOUT computed for another
+                    // size, so repainting it just redraws the same wrong
+                    // geometry. A same-size `Resized` is the documented way to
+                    // make Slint recompute every position and clip — the same
+                    // trick `apply_ui_scale` uses, for the same reason.
+                    crate::winmsg::Incoming::Relayout => {
+                        let win = w.window();
+                        let physical = win.size();
+                        let scale = win.scale_factor().max(0.1);
+                        if physical.width > 0 && physical.height > 0 {
+                            let logical = slint::LogicalSize::new(
+                                (physical.width as f32 / scale).max(1.0),
+                                (physical.height as f32 / scale).max(1.0),
+                            );
+                            win.dispatch_event(slint::platform::WindowEvent::Resized {
+                                size: logical,
+                            });
+                        }
+                        win.request_redraw();
+                        // EXPERIMENT: nudge the interface zoom down and back up.
+                        // Repainting and re-layout both leave the transparent gaps
+                        // in place (the software backend keeps its own damage
+                        // set), but a scale change makes Slint rebuild every
+                        // rendering resource, which is a different path entirely.
+                        // 5% for a few tens of milliseconds is meant to be barely
+                        // perceptible; if it is, this whole block is dropped.
+                        {
+                            use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+                            static SCALE_NUDGE: AtomicBool = AtomicBool::new(false);
+                            if !SCALE_NUDGE.swap(true, AtomicOrdering::Relaxed) {
+                                let current = tab_state.snapshot_config().ui_scale.max(0.1);
+                                apply_ui_scale(&w, &tab_state, current * 0.95);
+                                let weak = w.as_weak();
+                                let state = tab_state.clone();
+                                let timer = slint::Timer::default();
+                                timer.start(
+                                    slint::TimerMode::SingleShot,
+                                    std::time::Duration::from_millis(40),
+                                    move || {
+                                        SCALE_NUDGE.store(false, AtomicOrdering::Relaxed);
+                                        if let Some(w) = weak.upgrade() {
+                                            apply_ui_scale(&w, &state, current);
+                                        }
+                                    },
+                                );
+                                std::mem::forget(timer);
+                            }
+                        }
+                    }
                 }
             });
             if !ipc_ready {
