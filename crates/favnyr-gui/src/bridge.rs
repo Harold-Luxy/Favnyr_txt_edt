@@ -80,6 +80,7 @@ const MIN_SPLIT_RATIO: f32 = 0.08;
 
 mod archive;
 mod item_geometry;
+mod platform;
 mod properties;
 mod recovery;
 mod search;
@@ -2255,35 +2256,10 @@ pub fn install(window: &MainWindow, state: AppState) {
                             });
                         }
                         win.request_redraw();
-                        // EXPERIMENT: nudge the interface zoom down and back up.
-                        // Repainting and re-layout both leave the transparent gaps
-                        // in place (the software backend keeps its own damage
-                        // set), but a scale change makes Slint rebuild every
-                        // rendering resource, which is a different path entirely.
-                        // 5% for a few tens of milliseconds is meant to be barely
-                        // perceptible; if it is, this whole block is dropped.
-                        {
-                            use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-                            static SCALE_NUDGE: AtomicBool = AtomicBool::new(false);
-                            if !SCALE_NUDGE.swap(true, AtomicOrdering::Relaxed) {
-                                let current = tab_state.snapshot_config().ui_scale.max(0.1);
-                                apply_ui_scale(&w, &tab_state, current * 0.95);
-                                let weak = w.as_weak();
-                                let state = tab_state.clone();
-                                let timer = slint::Timer::default();
-                                timer.start(
-                                    slint::TimerMode::SingleShot,
-                                    std::time::Duration::from_millis(40),
-                                    move || {
-                                        SCALE_NUDGE.store(false, AtomicOrdering::Relaxed);
-                                        if let Some(w) = weak.upgrade() {
-                                            apply_ui_scale(&w, &state, current);
-                                        }
-                                    },
-                                );
-                                std::mem::forget(timer);
-                            }
-                        }
+                        // See `platform::rebuild_after_foreground`: the software
+                        // backend leaves regions unpainted on re-exposure unless its
+                        // rendering resources are rebuilt.
+                        platform::rebuild_after_foreground(&w, &tab_state);
                     }
                 }
             });
