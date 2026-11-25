@@ -14228,8 +14228,6 @@ fn open_editor_view(window: &MainWindow, state: &AppState, file: PathBuf) {
 /// note and far below anything that hurts.
 const MAX_EDITOR_BYTES: u64 = 1024 * 1024;
 
-
-
 /// Records what the user typed, without touching the disk.
 fn set_editor_text(state: &AppState, idx: usize, text: String) -> bool {
     let mut buffers = state.editor_buffers.borrow_mut();
@@ -14242,8 +14240,6 @@ fn set_editor_text(state: &AppState, idx: usize, text: String) -> bool {
     buffer.text = text;
     buffer.is_dirty()
 }
-
-
 
 /// Path of the folder at row `row` of panel `panel`, if it is one — for
 /// dropping a selection INTO a subfolder hovered during a drag.
