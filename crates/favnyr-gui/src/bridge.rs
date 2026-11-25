@@ -80,7 +80,6 @@ const MIN_SPLIT_RATIO: f32 = 0.08;
 
 mod archive;
 mod item_geometry;
-mod platform;
 mod editor;
 pub(crate) use editor::flush_editor_views;
 use editor::{drop_editor_buffer, editor_is_dirty, load_editor_buffer, save_editor};
@@ -1383,10 +1382,22 @@ pub fn install(window: &MainWindow, state: AppState) {
                             });
                         }
                         win.request_redraw();
-                        // See `platform::rebuild_after_foreground`: the software
-                        // backend leaves regions unpainted on re-exposure unless its
-                        // rendering resources are rebuilt.
-                        platform::rebuild_after_foreground(&w, &tab_state);
+                        // The UI-scale round trip that used to stand here is
+                        // gone. It existed because the software renderer
+                        // answered the repaint Windows asks for on re-exposure
+                        // with a partial frame whose damage set was empty, so
+                        // the gaps stayed; dipping the scale forced Slint to
+                        // rebuild every rendering resource and cleared them.
+                        // Slint 1.19 reads the region Windows invalidated
+                        // instead of trusting its own set (upstream #13568),
+                        // which covers both the scale change and the restore
+                        // from minimised, so the backend repaints on its own.
+                        // Do not bring it back without re-reading that PR.
+                        //
+                        // The `Resized` above is a different symptom and stays:
+                        // it repairs geometry computed for another size (a
+                        // column clipped by the window edge, a scrollbar drawn
+                        // outside its panel), which repainting cannot fix.
                     }
                 }
             });

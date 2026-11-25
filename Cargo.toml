@@ -14,6 +14,14 @@ repository   = "https://github.com/GlitchAwakened/Favnyr"
 # dynamic GridLayout rows introduced after 1.13, so silently selecting an older
 # MSRV-compatible release would fail in the build script.
 #
+# 1.19.1 rather than 1.18.1 for one fix: #13568, "winit: repaint what Windows
+# invalidated". The software renderer answered the repaint Windows asks for
+# after a scale change or a restore from minimized with a partial frame whose
+# dirty region was empty, so the window kept showing an older frame -- our
+# transparent gaps on the way back from the background. The window no longer
+# needs the UI-scale round trip in bridge/platform.rs to come back painted.
+# Editions are opt-in, so this does not change layout semantics.
+#
 # Two of Slint default features are deliberately LEFT OUT, and the rest is
 # listed explicitly so the omissions stay legible:
 #
@@ -24,14 +32,14 @@ repository   = "https://github.com/GlitchAwakened/Favnyr"
 #   a software shim: slower than Slint own rasteriser, and resize costs
 #   enough to starve audio. One renderer also removes "which backend am I
 #   on today" differences, at the price of real GPU acceleration.
-slint              = { version = "=1.18.1", default-features = false, features = [
+slint              = { version = "=1.19.1", default-features = false, features = [
     "std",
     "backend-default",
     "renderer-software",
     "compat-1-2",
     "system-tray",
 ] }
-slint-build        = "=1.18.1"
+slint-build        = "=1.19.1"
 serde              = { version = "1", features = ["derive"] }
 toml               = "0.9"
 tracing            = "0.1"
