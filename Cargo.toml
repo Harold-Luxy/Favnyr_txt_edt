@@ -14,15 +14,19 @@ repository   = "https://github.com/GlitchAwakened/Favnyr"
 # dynamic GridLayout rows introduced after 1.13, so silently selecting an older
 # MSRV-compatible release would fail in the build script.
 #
-# `accessibility` is deliberately LEFT OUT: it is one of Slint's defaults, and
-# the AccessKit tree it republishes on every relayout is a candidate cause of
-# the window-resize lag (the whole UI is rebuilt per size change, and the tree
-# is pushed synchronously on the UI thread). Listed explicitly, minus that one,
-# so the comparison against the default build isolates exactly this flag.
+# Two of Slint default features are deliberately LEFT OUT, and the rest is
+# listed explicitly so the omissions stay legible:
+#
+# * accessibility - the AccessKit tree is rebuilt and republished on every
+#   relayout, synchronously on the UI thread; it made dragging stutter.
+# * renderer-femtovg - the OpenGL backend. Nothing here calls GL, and on a
+#   machine whose driver is emulated femtovg rasterises every frame through
+#   a software shim: slower than Slint own rasteriser, and resize costs
+#   enough to starve audio. One renderer also removes "which backend am I
+#   on today" differences, at the price of real GPU acceleration.
 slint              = { version = "=1.18.1", default-features = false, features = [
     "std",
     "backend-default",
-    "renderer-femtovg",
     "renderer-software",
     "compat-1-2",
     "system-tray",

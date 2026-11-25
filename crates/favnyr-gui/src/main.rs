@@ -397,11 +397,11 @@ fn install_console_ctrl_handler(window: &MainWindow) {
 
 fn main() -> Result<()> {
     let t_start = std::time::Instant::now();
-    // Software rasteriser by default: on this machine GL is emulated, and
-    // resizing a window through it costs enough to stutter audio. Its one
-    // defect — transparent gaps when the window comes back to the foreground —
-    // is a damage-tracking bug in that backend and is documented as a known
-    // limitation. `SLINT_BACKEND=winit-femtovg` switches to GL without a rebuild.
+    // Software rasteriser — the only renderer this build ships. femtovg (GL)
+    // was removed from the feature list: nothing in the application calls GL,
+    // and on a machine whose driver is emulated it is slower than this path
+    // and makes window resizing costly enough to stutter audio. Naming the
+    // backend explicitly keeps the failure mode obvious if that ever changes.
     if std::env::var_os("SLINT_BACKEND").is_none() {
         // SAFETY: single-threaded, before Slint starts threads or reads the env.
         unsafe { std::env::set_var("SLINT_BACKEND", "winit-software") };
